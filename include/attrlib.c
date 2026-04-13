@@ -29,14 +29,20 @@ void print_stats(struct stat file_stats)
     printf("\t%s %s(uid: %u)%s\n", username, C_YELLOW, user_id, C_RESET);
     
     // creation time
-    time(&file_stats.st_ctime);
-    struct tm *time_info;
-    time_info = localtime(&file_stats.st_ctime);
-    char formatted_time[100];
-
-    strftime(formatted_time, sizeof(formatted_time), "%A, %B %d, %Y - %H:%M:%S", time_info);
+    char *created_date = formatted_time(file_stats.st_ctime);
     print_c("Date:", C_CYAN);
-    printf("\t%s%s%s\n", C_YELLOW, formatted_time, C_RESET);
+    printf("\t%s%s%s\n", C_YELLOW, created_date, C_RESET);
+}
+
+char *formatted_time(__time_t c_time)
+{
+    time(&c_time);
+    struct tm *time_info;
+    time_info = localtime(&c_time);
+    char *f_time = (char *) malloc(MAX_DATE_LENGTH * sizeof(char));
+
+    strftime(f_time, MAX_DATE_LENGTH, "%A, %B %d, %Y - %H:%M:%S", time_info);
+    return f_time;
 }
 
 char *file_type(__mode_t mode)
