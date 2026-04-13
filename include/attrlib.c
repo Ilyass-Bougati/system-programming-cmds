@@ -1,23 +1,42 @@
 #include "attrlib.h"
+#include "pwd.h"
+#include "colors.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 void print_stats(struct stat file_stats)
 {
     // file serial number (inode)
     long file_inode = (long) file_stats.st_ino;
     char *type = file_type(file_stats.st_mode);
-    printf("Inode: %lu\t\ttype: %s\n", file_inode, type);
+    print_c("Inode:", C_CYAN);
+    printf("\t%lu\t\t\t ", file_inode);
+    print_c("Type:", C_CYAN);
+    printf("\t%s\n", type);
+
     // size of file
     char *file_size = human_file_size(file_stats.st_size);
-    printf("size: %s\n", file_size);
-    
-    // device
-    // link count
+    print_c("Size:", C_CYAN);
+    printf("\t%s\t\t ", file_size);
+    print_c("Links:", C_CYAN);
+    printf(" %lu\n", (unsigned long int) file_stats.st_nlink);
+
     // owner
-    // group
+    unsigned int user_id = (unsigned int) file_stats.st_uid;
+    char *username = file_owner(file_stats.st_uid);
+    print_c("Owner:", C_CYAN);
+    printf("\t%s %s(uid: %u)%s\n", username, C_YELLOW, user_id, C_RESET);
     
     // creation time
+    time(&file_stats.st_ctime);
+    struct tm *time_info;
+    time_info = localtime(&file_stats.st_ctime);
+    char formatted_time[100];
+
+    strftime(formatted_time, sizeof(formatted_time), "%A, %B %d, %Y - %H:%M:%S", time_info);
+    print_c("Date:", C_CYAN);
+    printf("\t%s%s%s\n", C_YELLOW, formatted_time, C_RESET);
 }
 
 char *file_type(__mode_t mode)
@@ -38,6 +57,12 @@ char *file_type(__mode_t mode)
     }
 
     return type;
+}
+
+char *file_owner(__uid_t uid)
+{
+    struct passwd *user = getpwuid(uid);
+    return user->pw_name;
 }
 
 char *human_file_size(__off_t size)

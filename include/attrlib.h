@@ -20,4 +20,9 @@ char *file_type(__mode_t mode);
 */
 char *human_file_size(__off_t size);
 
+/*
+    Get file owner from the st_uid
+*/
+char *file_owner(__uid_t uid);
+
 #endif
