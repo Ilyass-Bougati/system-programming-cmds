@@ -1,17 +1,19 @@
-# Compiler and archiving tools
 CC = gcc
 AR = ar
-
 CFLAGS = -Wall -Wextra -O2 -Iinclude
-SRC_INC = $(wildcard include/*.c)
-SRCS = $(SRC_INC)
-OBJS = $(SRCS:.c=.o)
-ATTR = attr
-CDROIT = cdroit
 
 TARGET = mylib.a
+SRC_INC = $(wildcard include/*.c)
+OBJS = $(SRC_INC:.c=.o)
 
-all: $(TARGET)
+PROGS = attr cdroit cowner cgroup suprimer
+BINS = $(addprefix bin/, $(PROGS))
+
+
+all: $(TARGET) $(BINS)
+
+bin:
+	mkdir -p bin
 
 $(TARGET): $(OBJS)
 	$(AR) rcs $@ $^
@@ -19,11 +21,9 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-attr: attr.c $(TARGET)
-	$(CC) $(CFLAGS) attr.c $(TARGET) -o $(ATTR)
-
-cdroit: cdroit.c $(TARGET)
-	$(CC) $(CFLAGS) cdroit.c $(TARGET) -o $(CDROIT)
+bin/%: %.c $(TARGET) | bin
+	$(CC) $(CFLAGS) $< $(TARGET) -o $@
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(ATTR) $(CDROIT)
+	rm -f $(OBJS) $(TARGET)
+	rm -rf bin

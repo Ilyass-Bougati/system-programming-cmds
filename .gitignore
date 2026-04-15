@@ -1,4 +1,3 @@
 include/*.o
-cdroit
-attr
+bin/
 *.a
