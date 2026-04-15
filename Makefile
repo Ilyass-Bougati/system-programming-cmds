@@ -6,7 +6,7 @@ TARGET = mylib.a
 SRC_INC = $(wildcard include/*.c)
 OBJS = $(SRC_INC:.c=.o)
 
-PROGS = attr cdroit cowner cgroup suprimer
+PROGS = myattr cdroit cowner cgroup suprimer
 BINS = $(addprefix bin/, $(PROGS))
 
 
