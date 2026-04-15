@@ -7,6 +7,7 @@ SRC_INC = $(wildcard include/*.c)
 SRCS = $(SRC_INC)
 OBJS = $(SRCS:.c=.o)
 ATTR = attr
+CDROIT = cdroit
 
 TARGET = mylib.a
 
@@ -21,5 +22,8 @@ $(TARGET): $(OBJS)
 attr: attr.c $(TARGET)
 	$(CC) $(CFLAGS) attr.c $(TARGET) -o $(ATTR)
 
+cdroit: cdroit.c $(TARGET)
+	$(CC) $(CFLAGS) cdroit.c $(TARGET) -o $(CDROIT)
+
 clean:
-	rm -f $(OBJS) $(TARGET) $(ATTR)
+	rm -f $(OBJS) $(TARGET) $(ATTR) $(CDROIT)

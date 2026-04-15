@@ -1,1 +1,4 @@
-include/*.a
+include/*.o
+cdroit
+attr
+*.a
