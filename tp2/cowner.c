@@ -1,28 +1,24 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
 #include <pwd.h>
-#include <sys/types.h>
-#include "include/colors.h"
+#include <unistd.h>
+
+#define C_RESET  "\e[0m"
+#define C_YELLOW "\e[1;33m"
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
-        printf("This command change the owner of a file\n");
-        printf("Usage:\n");
-        printf("\tcowner %s[file_path] [username]%s", C_YELLOW, C_RESET);
+        printf("Changes the owner of a file\n");
+        printf("Usage:\n\tcowner " C_YELLOW "[file_path] [username]" C_RESET "\n");
         return 1;
     }
 
-    const char *file_path = argv[1];
-    const char *username = argv[2];
-
-    struct passwd *pwd = getpwnam(username);
-    if (pwd == NULL) {
-        fprintf(stderr, "Error: User '%s' does not exist.\n", username);
+    struct passwd *pwd = getpwnam(argv[2]);
+    if (!pwd) {
+        fprintf(stderr, "Error: User '%s' does not exist.\n", argv[2]);
         return 1;
     }
 
-    if (chown(file_path, pwd->pw_uid, -1) == -1) {
+    if (chown(argv[1], pwd->pw_uid, -1) == -1) {
         perror("Error changing owner");
         return 1;
     }

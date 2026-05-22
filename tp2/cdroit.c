@@ -1,36 +1,36 @@
 #include <stdio.h>
 #include <sys/stat.h>
-#include "include/attrlib.h"
-#include "include/cdroitlib.h"
-#include "include/colors.h"
 
-int main(int argc, char **argv)
-{
+#define C_RESET  "\e[0m"
+#define C_YELLOW "\e[1;33m"
+
+static void toggle_perm(mode_t *mode, char flag, char perm) {
+    static const struct { char flag, perm; mode_t bit; } table[] = {
+        {'u','r',S_IRUSR}, {'u','w',S_IWUSR}, {'u','x',S_IXUSR},
+        {'g','r',S_IRGRP}, {'g','w',S_IWGRP}, {'g','x',S_IXGRP},
+        {'o','r',S_IROTH}, {'o','w',S_IWOTH}, {'o','x',S_IXOTH},
+    };
+    for (int i = 0; i < 9; i++)
+        if (table[i].flag == flag && table[i].perm == perm)
+            *mode ^= table[i].bit;
+}
+
+int main(int argc, char **argv) {
     if (argc != 4) {
-        printf("This command edits the permission of a certain file for a certain user\n");
-        printf("if the user already has that permission, we remove it. Otherwise we add it\n\n");
-        printf("%sUSAGE:%s\n", C_YELLOW, C_RESET);
-        printf("\tcdroit %s[file_path] [U/G/O] [permission: R/W/X]%s\n\n", C_YELLOW, C_RESET);
+        printf("Toggles a file permission for a user/group/other\n\n");
+        printf(C_YELLOW "USAGE:\n" C_RESET);
+        printf("\tcdroit " C_YELLOW "[file_path] [U/G/O] [R/W/X]" C_RESET "\n");
+        return 1;
     }
 
-    char *file_path = argv[1];
-
-    char flag = (argv[2][0] >= 'A' && argv[2][0] <= 'Z') 
-                ? (argv[2][0] + ('a' - 'A')) : argv[2][0];
-
-    char perm = (argv[3][0] >= 'A' && argv[3][0] <= 'Z') 
-                ? (argv[3][0] + ('a' - 'A')) : argv[3][0];
-
-    // reading the original mode
-    struct stat file_info;
-    if (stat(file_path, &file_info) == -1)
-    {
+    struct stat fi;
+    if (stat(argv[1], &fi) == -1) {
         perror("Error opening file");
         return 1;
     }
 
-    __mode_t mode = file_info.st_mode;
-    get_mode(flag, perm, &mode);
-
-    chmod(file_path, mode);
+    mode_t mode = fi.st_mode;
+    toggle_perm(&mode, argv[2][0] | 0x20, argv[3][0] | 0x20);
+    chmod(argv[1], mode);
+    return 0;
 }

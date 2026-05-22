@@ -1,28 +1,24 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
 #include <grp.h>
-#include <sys/types.h>
-#include "include/colors.h"
+#include <unistd.h>
+
+#define C_RESET  "\e[0m"
+#define C_YELLOW "\e[1;33m"
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
-        printf("This command change the group of a file\n");
-        printf("Usage:\n");
-        printf("\tcgroup %s[file_path] [group]%s\n", C_YELLOW, C_RESET);
+        printf("Changes the group of a file\n");
+        printf("Usage:\n\tcgroup " C_YELLOW "[file_path] [group]" C_RESET "\n");
         return 1;
     }
 
-    const char *file_path = argv[1];
-    const char *groupname = argv[2];
-
-    struct group *grp = getgrnam(groupname);
-    if (grp == NULL) {
-        fprintf(stderr, "Error: Group '%s' does not exist.\n", groupname);
+    struct group *grp = getgrnam(argv[2]);
+    if (!grp) {
+        fprintf(stderr, "Error: Group '%s' does not exist.\n", argv[2]);
         return 1;
     }
 
-    if (chown(file_path, -1, grp->gr_gid) == -1) {
+    if (chown(argv[1], -1, grp->gr_gid) == -1) {
         perror("Error changing group");
         return 1;
     }
