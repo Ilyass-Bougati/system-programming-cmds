@@ -1,0 +1,539 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{booktabs}
+\usepackage{fancyhdr}
+\usepackage{lmodern}
+
+\setlength{\headheight}{14.5pt}
+
+% ── style des blocs de code ───────────────────────────────────────────────────
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{keyword}{HTML}{0000CC}
+\definecolor{comment}{HTML}{007700}
+\definecolor{string}{HTML}{CC0000}
+\definecolor{linenum}{HTML}{888888}
+
+\lstdefinestyle{cstyle}{
+    language=C,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{keyword}\bfseries,
+    commentstyle=\color{comment}\itshape,
+    stringstyle=\color{string},
+    numberstyle=\tiny\color{linenum},
+    numbers=left,
+    numbersep=8pt,
+    stepnumber=1,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    frame=single,
+    framesep=4pt,
+    xleftmargin=16pt,
+    xrightmargin=4pt,
+    captionpos=b,
+}
+
+\lstset{style=cstyle}
+
+% ── en-tête et pied de page ───────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Sockets 2 --- Programmation Système}
+\lhead{Chat TCP Multithreadé}
+\cfoot{\thepage}
+
+% ── document ──────────────────────────────────────────────────────────────────
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\Huge\bfseries Chat TCP Multithreadé\par}
+    \vspace{0.5cm}
+    {\Large Programmation Système en C --- Sockets 2\par}
+    \vspace{2cm}
+    \rule{\linewidth}{0.4pt}\\[0.4cm]
+    {\large Chat full-duplex sur socket TCP avec fils d'exécution POSIX\par}
+    \rule{\linewidth}{0.4pt}
+    \vfill
+    {\large Ilyass Bougati\par}
+    \vspace{0.3cm}
+    {\large \today\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ── Introduction ──────────────────────────────────────────────────────────────
+\section{Introduction}
+
+Ce projet est l'évolution directe du talkie-walkie (\emph{Sockets 1}). Il
+lève la contrainte semi-duplex en rendant la communication \textbf{full-duplex}
+: les deux interlocuteurs peuvent écrire et recevoir des messages en même temps,
+sans attendre leur tour.
+
+Pour cela, chaque côté (client et serveur) crée un fil d'exécution
+(\texttt{pthread}) dédié à la \emph{réception}, tandis que le fil principal
+se charge de l'\emph{envoi}. Les deux fils partagent un drapeau
+\texttt{volatile int running} pour se coordonner lors de la déconnexion.
+
+% ── Architecture ──────────────────────────────────────────────────────────────
+\section{Architecture}
+
+\subsection{Modèle de threading}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Fil & Rôle & Terminaison \\
+\midrule
+Principal (main) & Lire stdin et envoyer (\texttt{send}) & \texttt{/quit} ou EOF \\
+\texttt{recv\_thread} & Recevoir et afficher (\texttt{recv}) & Déconnexion ou \texttt{/quit} distant \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Les deux fils partagent la structure \texttt{thread\_arg\_t} :
+
+\begin{lstlisting}[caption={Structure partagée entre les deux fils}]
+typedef struct {
+    int fd;
+    char peer[NAME_SIZE];
+    volatile int *running;
+} thread_arg_t;
+\end{lstlisting}
+
+Le champ \texttt{running} est déclaré \texttt{volatile} pour indiquer au
+compilateur qu'il peut être modifié depuis un autre fil et empêcher toute
+optimisation qui le mettrait en cache dans un registre.
+
+\subsection{Échange des pseudonymes}
+
+Le handshake est identique à celui du talkie-walkie :
+
+\begin{enumerate}
+    \item Le serveur envoie son nom en premier.
+    \item Le client le reçoit, saisit le sien et l'envoie en retour.
+\end{enumerate}
+
+Une fois les noms échangés, le fil de réception est lancé et la boucle
+d'envoi démarre simultanément.
+
+\subsection{Arrêt propre}
+
+L'arrêt coordonné des deux fils est le point le plus délicat du programme.
+Lorsqu'un fil détecte la fin de la conversation (commande \texttt{/quit} ou
+déconnexion réseau), il positionne \texttt{running = 0}. Le fil principal
+appelle ensuite :
+
+\begin{lstlisting}[caption={Séquence d'arrêt}]
+running = 0;
+shutdown(sock_fd, SHUT_RDWR);  /* debloque le recv bloquant */
+pthread_join(tid, NULL);       /* attendre la fin du fil de reception */
+\end{lstlisting}
+
+L'appel à \texttt{shutdown(SHUT\_RDWR)} est essentiel : il force le
+\texttt{recv} bloquant dans \texttt{recv\_thread} à retourner immédiatement
+avec une valeur nulle ou négative, ce qui permet au fil de se terminer
+proprement sans attendre un prochain message réseau.
+
+\subsection{Affichage sans collision}
+
+Lorsqu'un message entrant arrive pendant que l'utilisateur est en train de
+taper, \texttt{recv\_thread} utilise la séquence d'échappement ANSI
+\texttt{\textbackslash r\textbackslash 033[K} pour revenir en début de ligne
+et l'effacer avant d'afficher le message reçu. Cela évite que le texte en
+cours de saisie et le message entrant se mélangent visuellement.
+
+% ── Appels système ────────────────────────────────────────────────────────────
+\section{Appels système et API utilisés}
+
+\begin{description}
+    \item[\texttt{socket} / \texttt{bind} / \texttt{listen} / \texttt{accept} / \texttt{connect}]
+        Infrastructure TCP standard, identique à \emph{Sockets 1}.
+    \item[\texttt{send} / \texttt{recv}]
+        Envoi et réception de données sur la socket connectée.
+    \item[\texttt{pthread\_create} / \texttt{pthread\_join}]
+        Création et attente du fil de réception (API POSIX Threads).
+    \item[\texttt{shutdown}]
+        Fermeture unidirectionnelle ou bidirectionnelle d'une socket,
+        utilisée ici pour débloquer un \texttt{recv} en attente.
+    \item[\texttt{signal(SIGINT, ...)}]
+        Gestion de Ctrl+C pour fermer proprement le descripteur d'écoute
+        côté serveur.
+    \item[\texttt{setsockopt(SO\_REUSEADDR)}]
+        Permet de relancer le serveur immédiatement après un arrêt sans
+        attendre l'expiration du délai \texttt{TIME\_WAIT}.
+\end{description}
+
+% ── Utilisation ───────────────────────────────────────────────────────────────
+\section{Utilisation}
+
+\begin{lstlisting}[language=bash, style=cstyle]
+# Terminal 1 : lancer le serveur sur le port 4242
+./server 4242
+
+# Terminal 2 : connecter le client
+./client 127.0.0.1 4242
+\end{lstlisting}
+
+La compilation requiert l'option \texttt{-pthread} (déjà présente dans le
+\texttt{Makefile}) pour lier la bibliothèque POSIX Threads.
+
+% ── Code source ───────────────────────────────────────────────────────────────
+\section{Code source}
+
+\subsection{\texttt{server.c}}
+
+\begin{lstlisting}[caption={\texttt{server.c} --- serveur de chat full-duplex multithreadé}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <pthread.h>
+#include <arpa/inet.h>
+
+#define BUF_SIZE 1024
+#define NAME_SIZE 64
+
+static int server_fd = -1;
+
+typedef struct {
+    int fd;
+    char peer[NAME_SIZE];
+    volatile int *running;
+} thread_arg_t;
+
+static void handle_sigint(int sig) {
+    (void)sig;
+    printf("\nClosing the server application...\n");
+    if (server_fd != -1)
+        close(server_fd);
+    exit(0);
+}
+
+static void *recv_thread(void *arg) {
+    thread_arg_t *a = arg;
+    char buf[BUF_SIZE];
+    ssize_t n;
+
+    while (*a->running) {
+        n = recv(a->fd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0) {
+            if (*a->running)
+                printf("\n%s disconnected. Press Enter to exit.\n", a->peer);
+            *a->running = 0;
+            return NULL;
+        }
+        buf[n] = '\0';
+        if (strcmp(buf, "/quit") == 0) {
+            printf("\n%s left the chat. Press Enter to exit.\n", a->peer);
+            *a->running = 0;
+            return NULL;
+        }
+        printf("\r\033[K%s: %s\n", a->peer, buf);
+        fflush(stdout);
+    }
+    return NULL;
+}
+
+static void chat(int client_fd, const char *peer_ip) {
+    char my_name[NAME_SIZE], their_name[NAME_SIZE], buf[BUF_SIZE];
+    ssize_t n;
+    volatile int running = 1;
+
+    printf("Enter your username: ");
+    fflush(stdout);
+    if (!fgets(my_name, sizeof(my_name), stdin))
+        return;
+    my_name[strcspn(my_name, "\n")] = '\0';
+
+    send(client_fd, my_name, strlen(my_name), 0);
+
+    n = recv(client_fd, their_name, sizeof(their_name) - 1, 0);
+    if (n <= 0)
+        return;
+    their_name[n] = '\0';
+
+    printf("Connected with %s (%s). You can both type freely!\n\n",
+           their_name, peer_ip);
+
+    thread_arg_t arg = { .fd = client_fd, .running = &running };
+    strncpy(arg.peer, their_name, NAME_SIZE - 1);
+    arg.peer[NAME_SIZE - 1] = '\0';
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, recv_thread, &arg);
+
+    while (running) {
+        printf("%s: ", my_name);
+        fflush(stdout);
+        if (!fgets(buf, sizeof(buf), stdin) || !running)
+            break;
+        buf[strcspn(buf, "\n")] = '\0';
+        if (!running)
+            break;
+        send(client_fd, buf, strlen(buf), 0);
+        if (strcmp(buf, "/quit") == 0) {
+            running = 0;
+            break;
+        }
+    }
+
+    running = 0;
+    shutdown(client_fd, SHUT_RDWR);
+    pthread_join(tid, NULL);
+    close(client_fd);
+    printf("Chat ended. Waiting for a new connection...\n\n");
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    int port = atoi(argv[1]);
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port: %s\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+
+    signal(SIGINT, handle_sigint);
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in address = {
+        .sin_family      = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port        = htons(port)
+    };
+
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        perror("bind");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(server_fd, 1) < 0) {
+        perror("listen");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Server listening on port %d...\n\n", port);
+
+    socklen_t addr_len = sizeof(address);
+    while (1) {
+        int client_fd = accept(server_fd,
+                               (struct sockaddr *)&address, &addr_len);
+        if (client_fd < 0) {
+            perror("accept");
+            continue;
+        }
+        printf("Client connected from %s\n", inet_ntoa(address.sin_addr));
+        chat(client_fd, inet_ntoa(address.sin_addr));
+    }
+
+    close(server_fd);
+    return 0;
+}
+\end{lstlisting}
+
+\subsection{\texttt{client.c}}
+
+\begin{lstlisting}[caption={\texttt{client.c} --- client de chat full-duplex multithreadé}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <arpa/inet.h>
+
+#define BUF_SIZE 1024
+#define NAME_SIZE 64
+
+typedef struct {
+    int fd;
+    char peer[NAME_SIZE];
+    volatile int *running;
+} thread_arg_t;
+
+static void *recv_thread(void *arg) {
+    thread_arg_t *a = arg;
+    char buf[BUF_SIZE];
+    ssize_t n;
+
+    while (*a->running) {
+        n = recv(a->fd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0) {
+            if (*a->running)
+                printf("\n%s disconnected. Press Enter to exit.\n", a->peer);
+            *a->running = 0;
+            return NULL;
+        }
+        buf[n] = '\0';
+        if (strcmp(buf, "/quit") == 0) {
+            printf("\n%s left the chat. Press Enter to exit.\n", a->peer);
+            *a->running = 0;
+            return NULL;
+        }
+        printf("\r\033[K%s: %s\n", a->peer, buf);
+        fflush(stdout);
+    }
+    return NULL;
+}
+
+static void chat(int sock_fd) {
+    char my_name[NAME_SIZE], their_name[NAME_SIZE], buf[BUF_SIZE];
+    ssize_t n;
+    volatile int running = 1;
+
+    n = recv(sock_fd, their_name, sizeof(their_name) - 1, 0);
+    if (n <= 0) {
+        fprintf(stderr, "Server closed connection.\n");
+        return;
+    }
+    their_name[n] = '\0';
+
+    printf("Enter your username: ");
+    fflush(stdout);
+    if (!fgets(my_name, sizeof(my_name), stdin))
+        return;
+    my_name[strcspn(my_name, "\n")] = '\0';
+
+    send(sock_fd, my_name, strlen(my_name), 0);
+
+    printf("Connected with %s. You can both type freely!\n\n", their_name);
+
+    thread_arg_t arg = { .fd = sock_fd, .running = &running };
+    strncpy(arg.peer, their_name, NAME_SIZE - 1);
+    arg.peer[NAME_SIZE - 1] = '\0';
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, recv_thread, &arg);
+
+    while (running) {
+        printf("%s: ", my_name);
+        fflush(stdout);
+        if (!fgets(buf, sizeof(buf), stdin) || !running)
+            break;
+        buf[strcspn(buf, "\n")] = '\0';
+        if (!running)
+            break;
+        send(sock_fd, buf, strlen(buf), 0);
+        if (strcmp(buf, "/quit") == 0) {
+            running = 0;
+            break;
+        }
+    }
+
+    running = 0;
+    shutdown(sock_fd, SHUT_RDWR);
+    pthread_join(tid, NULL);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <host> <port>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    int port = atoi(argv[2]);
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port: %s\n", argv[2]);
+        exit(EXIT_FAILURE);
+    }
+
+    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port   = htons(port)
+    };
+
+    if (inet_pton(AF_INET, argv[1], &addr.sin_addr) <= 0) {
+        fprintf(stderr, "Invalid address: %s\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+
+    if (connect(sock_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("connect");
+        exit(EXIT_FAILURE);
+    }
+
+    chat(sock_fd);
+    close(sock_fd);
+    return 0;
+}
+\end{lstlisting}
+
+\subsection{Makefile}
+
+\begin{lstlisting}[language=make, caption={Makefile --- compilation avec support POSIX Threads}]
+CC = gcc
+CFLAGS = -Wall -Wextra -pthread
+
+all: server client
+
+server: server.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+client: client.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+clean:
+	rm -f server client
+
+.PHONY: all clean
+\end{lstlisting}
+
+% ── Comparaison Sockets 1 / Sockets 2 ────────────────────────────────────────
+\section{Comparaison avec Sockets 1}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Aspect & Sockets 1 (talkie-walkie) & Sockets 2 (multithreadé) \\
+\midrule
+Mode de communication & Semi-duplex (tours alternés) & Full-duplex (simultané) \\
+Threads & Aucun & 1 fil de réception par côté \\
+Blocage & \texttt{recv} bloque l'envoi & Les deux opèrent en parallèle \\
+Arrêt & Retour de boucle simple & \texttt{shutdown} + \texttt{pthread\_join} \\
+Complexité & Faible & Moyenne \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ── Bilan ─────────────────────────────────────────────────────────────────────
+\section{Bilan}
+
+Ce projet démontre comment les fils d'exécution POSIX permettent de lever la
+contrainte bloquante inhérente aux appels \texttt{recv}, transformant un chat
+en mode talkie-walkie en une véritable messagerie en temps réel. Les points
+clés à retenir sont l'utilisation de \texttt{volatile} pour la variable
+partagée entre fils, l'importance de \texttt{shutdown} pour débloquer un
+\texttt{recv} en attente, et la nécessité d'attendre la fin du fil de
+réception via \texttt{pthread\_join} avant de fermer le descripteur de socket.
+
+\end{document}

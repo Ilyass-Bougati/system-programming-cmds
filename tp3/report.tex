@@ -1,0 +1,300 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{booktabs}
+\usepackage{fancyhdr}
+\usepackage{lmodern}
+
+% ── style des blocs de code ───────────────────────────────────────────────────
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{keyword}{HTML}{0000CC}
+\definecolor{comment}{HTML}{007700}
+\definecolor{string}{HTML}{CC0000}
+\definecolor{linenum}{HTML}{888888}
+
+\lstdefinestyle{cstyle}{
+    language=C,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{keyword}\bfseries,
+    commentstyle=\color{comment}\itshape,
+    stringstyle=\color{string},
+    numberstyle=\tiny\color{linenum},
+    numbers=left,
+    numbersep=8pt,
+    stepnumber=1,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    frame=single,
+    framesep=4pt,
+    xleftmargin=16pt,
+    xrightmargin=4pt,
+    captionpos=b,
+}
+
+\lstset{style=cstyle}
+
+% ── en-tête et pied de page ───────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{TP3 --- Programmation Système}
+\lhead{Gestion des processus en C}
+\cfoot{\thepage}
+
+% ── document ──────────────────────────────────────────────────────────────────
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\Huge\bfseries TP3 : Gestion des processus\par}
+    \vspace{0.5cm}
+    {\Large Programmation Système en C\par}
+    \vspace{2cm}
+    \rule{\linewidth}{0.4pt}\\[0.4cm]
+    {\large Trois programmes explorant les processus, les signaux et le système de fichiers\par}
+    \rule{\linewidth}{0.4pt}
+    \vfill
+    {\large Ilyass Bougati\par}
+    \vspace{0.3cm}
+    {\large \today\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ── Introduction ──────────────────────────────────────────────────────────────
+\section{Introduction}
+
+Ce rapport présente trois programmes en C développés dans le cadre du
+troisième travail pratique de programmation système. Ces programmes couvrent
+trois aspects complémentaires de la programmation UNIX :
+
+\begin{itemize}
+    \item \textbf{myls} --- une réimplémentation partielle de la commande
+          \texttt{ls}, mettant en \oe{}uvre les API de répertoires et
+          \texttt{stat}.
+    \item \textbf{oroboros} --- un lanceur/tueur de processus fondé sur une
+          liste chaînée, utilisant \texttt{fork}, \texttt{execvp} et
+          l'envoi de signaux.
+    \item \textbf{spam} --- un outil de stress qui forke un très grand nombre
+          de processus fils afin de saturer la table des processus du noyau.
+\end{itemize}
+
+Les trois programmes sont compilés avec \texttt{gcc -Wall -Wextra} via le
+\texttt{Makefile} commun fourni dans le projet.
+
+% ── myls ──────────────────────────────────────────────────────────────────────
+\section{\texttt{myls} --- Listage de répertoire}
+
+\subsection{Objectif}
+
+\texttt{myls} est un clone simplifié de l'utilitaire standard \texttt{ls}.
+Il liste le contenu d'un répertoire en ignorant les entrées cachées (celles
+dont le nom commence par un point) et supporte deux options :
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Option & Effet \\
+\midrule
+\texttt{-l} & Format long : permissions, liens, propriétaire, groupe, taille, date \\
+\texttt{-R} & Récursif : descend dans les sous-répertoires \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Appels système et API utilisés}
+
+\begin{description}
+    \item[\texttt{opendir} / \texttt{readdir} / \texttt{closedir}]
+        Permettent d'itérer sur les entrées d'un répertoire via le flux
+        \texttt{DIR} et la structure \texttt{struct dirent}.
+    \item[\texttt{lstat}]
+        Récupère les métadonnées d'un fichier (\texttt{struct stat}) sans
+        suivre les liens symboliques, ce qui est le comportement correct
+        pour \texttt{ls -l}.
+    \item[\texttt{getpwuid} / \texttt{getgrgid}]
+        Traduisent les valeurs numériques UID et GID en noms lisibles
+        depuis \texttt{/etc/passwd} et \texttt{/etc/group}.
+    \item[\texttt{localtime} / \texttt{strftime}]
+        Formatent l'horodatage de dernière modification selon le style
+        standard \texttt{MMM JJ HH:MM}.
+\end{description}
+
+\subsection{Remarques de conception}
+
+Le mode récursif (\texttt{-R}) collecte les chemins des sous-répertoires dans
+un tableau alloué dynamiquement (via \texttt{realloc}) lors d'un premier
+parcours, puis les traite après l'appel à \texttt{closedir}. Cela évite de
+maintenir plusieurs flux de répertoires ouverts simultanément.
+
+Les permissions sont décodées bit à bit à l'aide des macros \texttt{S\_I*}
+définies dans \texttt{<sys/stat.h>}, produisant la chaîne de dix caractères
+habituelle (ex.\ \texttt{drwxr-xr-x}).
+
+\subsection{Utilisation}
+
+\begin{lstlisting}[language=bash, style=cstyle]
+./myls                  # lister le repertoire courant
+./myls /etc             # lister /etc
+./myls -l /tmp          # format long
+./myls -R .             # recursif depuis le repertoire courant
+./myls -lR /usr/local   # long + recursif
+\end{lstlisting}
+
+\subsection{Code source}
+
+\lstinputlisting[caption={\texttt{myls.c} --- utilitaire de listage de répertoire}]{myls.c}
+
+% ── oroboros ──────────────────────────────────────────────────────────────────
+\section{\texttt{oroboros} --- Le serpent des processus}
+
+\subsection{Objectif}
+
+\texttt{oroboros} prend une liste de noms de programmes en argument, construit
+une liste chaînée à raison d'un nœud par programme, fork un processus fils
+pour chaque nœud (en lançant le programme correspondant), affiche l'état de la
+liste, puis --- sur appui d'une touche --- envoie \texttt{SIGTERM} à chaque
+fils, attend une seconde, puis envoie \texttt{SIGKILL} aux survivants avant de
+récolter tous les fils et de libérer la liste.
+
+Le nom fait référence à l'ancien symbole du serpent qui se mord la queue : le
+programme qui crée la vie la détruit aussi.
+
+\subsection{Structure de données}
+
+\begin{lstlisting}[caption={Nœud de la liste chaînée \texttt{AppNode}}]
+typedef struct AppNode {
+    char           *name;
+    pid_t           pid;     /* renseigne apres fork */
+    struct AppNode *next;
+} AppNode;
+\end{lstlisting}
+
+Chaque nœud stocke le nom du programme (alloué sur le tas via
+\texttt{strdup}), le PID assigné après \texttt{fork}, et un pointeur vers le
+nœud suivant.
+
+\subsection{Cycle de vie des processus}
+
+\begin{enumerate}
+    \item \textbf{Construction} --- \texttt{list\_append} parcourt la liste
+          jusqu'à la queue et y ajoute un nœud pour chaque entrée de
+          \texttt{argv}.
+    \item \textbf{Lancement} --- \texttt{launch} appelle \texttt{fork} ; le
+          fils redirige stdout et stderr vers \texttt{/dev/null} (pour ne pas
+          polluer le terminal) puis appelle \texttt{execvp}, qui le remplace
+          par le programme cible.
+    \item \textbf{Arrêt} --- \texttt{kill\_all} effectue deux passes :
+          d'abord \texttt{SIGTERM} (arrêt gracieux), puis après une seconde
+          de délai \texttt{SIGKILL} (arrêt inconditionnel). Une boucle
+          \texttt{waitpid(-1, NULL, WNOHANG)} récolte ensuite les zombies
+          éventuels.
+    \item \textbf{Libération} --- \texttt{list\_free} parcourt la liste et
+          libère la chaîne de nom ainsi que le nœud lui-même.
+\end{enumerate}
+
+\subsection{Utilisation}
+
+\begin{lstlisting}[language=bash, style=cstyle]
+./oroboros top vim zsh nano
+\end{lstlisting}
+
+\subsection{Code source}
+
+\lstinputlisting[caption={\texttt{oroboros.c} --- lanceur/tueur de processus par liste chaînée}]{oroboros.c}
+
+% ── spam ──────────────────────────────────────────────────────────────────────
+\section{\texttt{spam} --- Inondation de processus}
+
+\subsection{Objectif}
+
+\texttt{spam} est un outil de stress. Pour chaque nom de programme passé en
+argument, il fork jusqu'à \texttt{COPIES} (1\,000\,000) processus fils,
+chacun exécutant ce programme avec sa sortie redirigée vers \texttt{/dev/null}.
+Après avoir lancé toutes les copies, il attend la fin de chaque fils,
+ne laissant aucun zombie derrière lui.
+
+\begin{lstlisting}[caption={Constante définissant le nombre de copies}]
+#define COPIES 1000000
+\end{lstlisting}
+
+\subsection{Comportement face aux limites du système}
+
+En pratique, \texttt{pid\_max} du noyau et la limite utilisateur
+\texttt{RLIMIT\_NPROC} sont atteintes bien avant qu'un million de processus
+soient créés. Lorsque \texttt{fork} échoue, il retourne \texttt{-1} ;
+\texttt{spam} affiche le message d'erreur via \texttt{perror}, passe à
+l'itération suivante et continue, de sorte que le compteur \texttt{launched}
+reflète fidèlement le nombre de processus réellement créés.
+
+\subsection{Nettoyage}
+
+Toutes les sorties des fils sont redirigées vers \texttt{/dev/null} (ouvert
+une seule fois avant les boucles et partagé entre tous les fils). Après tous
+les forks, le parent entre dans une boucle bloquante
+\texttt{waitpid(-1, NULL, 0)} qui tourne jusqu'à ce qu'il n'y ait plus de
+fils, garantissant l'absence de zombies dans la table des processus.
+
+\subsection{Utilisation}
+
+\begin{lstlisting}[language=bash, style=cstyle]
+./spam yes          # forker 1 000 000 copies de 'yes'
+./spam ls cat       # inonder avec deux programmes en sequence
+\end{lstlisting}
+
+\textbf{Avertissement :} ce programme épuise intentionnellement les ressources
+système et ne doit être exécuté que dans un environnement contrôlé ou dans un
+conteneur avec des paramètres \texttt{ulimit} appropriés.
+
+\subsection{Code source}
+
+\lstinputlisting[caption={\texttt{spam.c} --- utilitaire d'inondation de processus}]{spam.c}
+
+% ── Système de compilation ────────────────────────────────────────────────────
+\section{Système de compilation}
+
+Les trois programmes sont compilés par le \texttt{Makefile} suivant. La règle
+de motif \texttt{\%: \%.c} compile chaque fichier \texttt{.c} trouvé dans le
+répertoire en un binaire portant le même nom de base, en utilisant \texttt{gcc}
+avec \texttt{-Wall -Wextra} pour activer des avertissements complets.
+
+\lstinputlisting[language=make, caption={Makefile}]{Makefile}
+
+La commande \texttt{make} compile les trois binaires ; \texttt{make clean}
+les supprime.
+
+% ── Bilan ─────────────────────────────────────────────────────────────────────
+\section{Bilan comparatif}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Programme  & API principale                         & Processus créés          & Nettoyage \\
+\midrule
+myls       & \texttt{opendir}, \texttt{lstat}       & 0 (mono-processus)       & sans objet \\
+oroboros   & \texttt{fork}, \texttt{execvp}, \texttt{kill} & un par argument    & SIGTERM + SIGKILL \\
+spam       & \texttt{fork}, \texttt{execvp}         & jusqu'à $10^6$ par argument & boucle \texttt{waitpid} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Les trois programmes forment une progression naturelle en complexité :
+\texttt{myls} opère entièrement dans un seul processus et explore l'API du
+système de fichiers ; \texttt{oroboros} introduit la création de processus,
+l'exécution et la terminaison contrôlée via des signaux ; \texttt{spam} pousse
+les mécanismes de création de processus à leurs limites, servant à la fois de
+test de stress et de démonstration des contraintes de la table des processus
+du noyau.
+
+\end{document}

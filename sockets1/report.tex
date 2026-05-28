@@ -1,0 +1,442 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{booktabs}
+\usepackage{fancyhdr}
+\usepackage{lmodern}
+
+\setlength{\headheight}{14.5pt}
+
+% ── style des blocs de code ───────────────────────────────────────────────────
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{keyword}{HTML}{0000CC}
+\definecolor{comment}{HTML}{007700}
+\definecolor{string}{HTML}{CC0000}
+\definecolor{linenum}{HTML}{888888}
+
+\lstdefinestyle{cstyle}{
+    language=C,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{keyword}\bfseries,
+    commentstyle=\color{comment}\itshape,
+    stringstyle=\color{string},
+    numberstyle=\tiny\color{linenum},
+    numbers=left,
+    numbersep=8pt,
+    stepnumber=1,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    frame=single,
+    framesep=4pt,
+    xleftmargin=16pt,
+    xrightmargin=4pt,
+    captionpos=b,
+}
+
+\lstset{style=cstyle}
+
+% ── en-tête et pied de page ───────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Sockets 1 --- Programmation Système}
+\lhead{Talkie-Walkie TCP}
+\cfoot{\thepage}
+
+% ── document ──────────────────────────────────────────────────────────────────
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\Huge\bfseries Talkie-Walkie TCP\par}
+    \vspace{0.5cm}
+    {\Large Programmation Système en C --- Sockets 1\par}
+    \vspace{2cm}
+    \rule{\linewidth}{0.4pt}\\[0.4cm]
+    {\large Chat semi-duplex sur socket TCP avec échange de tours\par}
+    \rule{\linewidth}{0.4pt}
+    \vfill
+    {\large Ilyass Bougati\par}
+    \vspace{0.3cm}
+    {\large \today\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ── Introduction ──────────────────────────────────────────────────────────────
+\section{Introduction}
+
+Ce projet implémente une application de chat en mode \textbf{semi-duplex}
+(talkie-walkie) sur une socket TCP. Le principe est simple : à l'image d'un
+vrai talkie-walkie, un seul des deux interlocuteurs peut parler à la fois. Le
+client envoie un message, attend la réponse du serveur, puis envoie à nouveau
+--- et ainsi de suite. Aucun fil d'exécution supplémentaire n'est nécessaire ;
+les appels à \texttt{send} et \texttt{recv} sont simplement enchaînés de
+manière alternée.
+
+Le projet se compose de deux programmes :
+
+\begin{itemize}
+    \item \textbf{server} --- se met en écoute sur un port, accepte les
+          connexions entrantes une par une et prend part à la conversation.
+    \item \textbf{client} --- se connecte à l'adresse et au port indiqués
+          et initie la conversation.
+\end{itemize}
+
+% ── Architecture ──────────────────────────────────────────────────────────────
+\section{Architecture réseau}
+
+\subsection{Établissement de la connexion}
+
+La connexion suit le modèle TCP classique :
+
+\begin{enumerate}
+    \item Le serveur crée une socket (\texttt{SOCK\_STREAM}), lie
+          (\texttt{bind}) l'adresse \texttt{INADDR\_ANY} au port demandé,
+          puis se met en écoute (\texttt{listen}).
+    \item Le client crée sa propre socket et appelle \texttt{connect} vers
+          l'adresse IP et le port du serveur.
+    \item Le serveur appelle \texttt{accept}, qui retourne un descripteur de
+          fichier dédié à cette connexion.
+\end{enumerate}
+
+L'option \texttt{SO\_REUSEADDR} est positionnée sur le serveur pour éviter
+l'erreur \texttt{Address already in use} lors des redémarrages rapides.
+
+\subsection{Échange des pseudonymes}
+
+Avant d'entrer dans la boucle de chat, les deux parties échangent leur
+pseudonyme :
+
+\begin{enumerate}
+    \item Le serveur saisit son nom et l'envoie au client.
+    \item Le client reçoit ce nom, saisit le sien et l'envoie en retour.
+\end{enumerate}
+
+Cet handshake permet à chaque côté d'afficher les messages sous la forme
+\texttt{<nom>: <message>}.
+
+\subsection{Protocole semi-duplex}
+
+La boucle de conversation est strictement alternée :
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Tour & Côté client & Côté serveur \\
+\midrule
+1 & \texttt{send(message)} & \texttt{recv(message)} \\
+2 & \texttt{recv(réponse)} & \texttt{send(réponse)} \\
+3 & \texttt{send(message)} & \texttt{recv(message)} \\
+\ldots & \ldots & \ldots \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+La commande \texttt{/quit} met fin à la conversation des deux côtés.
+
+% ── Signaux ───────────────────────────────────────────────────────────────────
+\section{Gestion des signaux}
+
+Le serveur installe un gestionnaire pour \texttt{SIGINT} (Ctrl+C) via
+\texttt{signal(SIGINT, handle\_sigint)}. Ce gestionnaire ferme proprement
+le descripteur d'écoute avant de quitter, évitant ainsi que le port reste
+occupé.
+
+% ── Utilisation ───────────────────────────────────────────────────────────────
+\section{Utilisation}
+
+\begin{lstlisting}[language=bash, style=cstyle]
+# Terminal 1 : lancer le serveur sur le port 4242
+./server 4242
+
+# Terminal 2 : connecter le client
+./client 127.0.0.1 4242
+\end{lstlisting}
+
+% ── Code source ───────────────────────────────────────────────────────────────
+\section{Code source}
+
+\subsection{\texttt{server.c}}
+
+\begin{lstlisting}[caption={\texttt{server.c} --- serveur de chat semi-duplex}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <arpa/inet.h>
+
+#define BUF_SIZE 1024
+#define NAME_SIZE 64
+
+static int server_fd = -1;
+
+static void handle_sigint(int sig) {
+    (void)sig;
+    printf("\nClosing the server application...\n");
+    if (server_fd != -1)
+        close(server_fd);
+    exit(0);
+}
+
+void chat(int client_fd) {
+    char my_name[NAME_SIZE];
+    char their_name[NAME_SIZE];
+    char buf[BUF_SIZE];
+    ssize_t n;
+
+    printf("Enter your username: ");
+    fflush(stdout);
+    if (!fgets(my_name, sizeof(my_name), stdin))
+        return;
+    my_name[strcspn(my_name, "\n")] = '\0';
+
+    send(client_fd, my_name, strlen(my_name), 0);
+
+    n = recv(client_fd, their_name, sizeof(their_name) - 1, 0);
+    if (n <= 0)
+        return;
+    their_name[n] = '\0';
+
+    printf("%s joined the chat. They go first.\n", their_name);
+
+    while (1) {
+        n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0) {
+            printf("%s disconnected.\n", their_name);
+            break;
+        }
+        buf[n] = '\0';
+
+        if (strcmp(buf, "/quit") == 0) {
+            printf("%s left the chat.\n", their_name);
+            break;
+        }
+        printf("%s: %s\n", their_name, buf);
+
+        printf("%s: ", my_name);
+        fflush(stdout);
+        if (!fgets(buf, sizeof(buf), stdin))
+            break;
+        buf[strcspn(buf, "\n")] = '\0';
+
+        send(client_fd, buf, strlen(buf), 0);
+
+        if (strcmp(buf, "/quit") == 0)
+            break;
+    }
+
+    close(client_fd);
+    printf("Chat ended. Waiting for a new connection...\n\n");
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    int port = atoi(argv[1]);
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port: %s\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+
+    signal(SIGINT, handle_sigint);
+
+    int client_fd;
+    struct sockaddr_in address;
+    socklen_t addr_len = sizeof(address);
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(port);
+
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        perror("bind");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(server_fd, 1) < 0) {
+        perror("listen");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Server listening on port %d...\n\n", port);
+
+    while (1) {
+        client_fd = accept(server_fd, (struct sockaddr *)&address, &addr_len);
+        if (client_fd < 0) {
+            perror("accept");
+            continue;
+        }
+        printf("Client connected from %s\n", inet_ntoa(address.sin_addr));
+        chat(client_fd);
+    }
+
+    close(server_fd);
+    return 0;
+}
+\end{lstlisting}
+
+\subsection{\texttt{client.c}}
+
+\begin{lstlisting}[caption={\texttt{client.c} --- client de chat semi-duplex}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define BUF_SIZE 1024
+#define NAME_SIZE 64
+
+void chatc(int sock_fd) {
+    char my_name[NAME_SIZE];
+    char their_name[NAME_SIZE];
+    char buf[BUF_SIZE];
+    ssize_t n;
+
+    n = recv(sock_fd, their_name, sizeof(their_name) - 1, 0);
+    if (n <= 0) {
+        fprintf(stderr, "Server closed connection.\n");
+        return;
+    }
+    their_name[n] = '\0';
+
+    printf("Enter your username: ");
+    fflush(stdout);
+    if (!fgets(my_name, sizeof(my_name), stdin))
+        return;
+    my_name[strcspn(my_name, "\n")] = '\0';
+
+    send(sock_fd, my_name, strlen(my_name), 0);
+
+    printf("Connected to %s. You go first!\n\n", their_name);
+
+    while (1) {
+        printf("%s: ", my_name);
+        fflush(stdout);
+        if (!fgets(buf, sizeof(buf), stdin))
+            break;
+        buf[strcspn(buf, "\n")] = '\0';
+
+        send(sock_fd, buf, strlen(buf), 0);
+
+        if (strcmp(buf, "/quit") == 0)
+            break;
+
+        n = recv(sock_fd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0) {
+            printf("%s disconnected.\n", their_name);
+            break;
+        }
+        buf[n] = '\0';
+
+        if (strcmp(buf, "/quit") == 0) {
+            printf("%s left the chat.\n", their_name);
+            break;
+        }
+        printf("%s: %s\n", their_name, buf);
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <host> <port>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    int port = atoi(argv[2]);
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port: %s\n", argv[2]);
+        exit(EXIT_FAILURE);
+    }
+
+    int sock_fd;
+    struct sockaddr_in server_addr;
+
+    sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, argv[1], &server_addr.sin_addr) <= 0) {
+        fprintf(stderr, "Invalid address: %s\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+
+    if (connect(sock_fd, (struct sockaddr *)&server_addr,
+                sizeof(server_addr)) < 0) {
+        perror("connect");
+        exit(EXIT_FAILURE);
+    }
+
+    chatc(sock_fd);
+
+    close(sock_fd);
+    return 0;
+}
+\end{lstlisting}
+
+\subsection{Makefile}
+
+\begin{lstlisting}[language=make, caption={Makefile --- compilation des deux binaires}]
+CC = gcc
+CFLAGS = -Wall -Wextra
+
+all: server client
+
+server: server.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+client: client.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+clean:
+	rm -f server client
+
+.PHONY: all clean
+\end{lstlisting}
+
+% ── Bilan ─────────────────────────────────────────────────────────────────────
+\section{Bilan}
+
+Ce projet illustre les bases de la programmation réseau en C : création de
+socket, liaison, écoute, connexion et échange de données. Le modèle
+semi-duplex est intentionnellement simple --- aucun thread, aucun
+multiplexage --- ce qui permet de se concentrer sur le cycle de vie d'une
+connexion TCP et sur le protocole applicatif minimal (échange de noms,
+boucle alternée, commande \texttt{/quit}).
+
+La limitation principale est précisément ce caractère bloquant : si l'un
+des deux interlocuteurs tarde à répondre, l'autre est figé dans son appel
+\texttt{recv}. C'est cette contrainte que lève le projet suivant
+(\emph{Sockets 2}) en introduisant des fils d'exécution dédiés à la
+réception.
+
+\end{document}
