@@ -1,6 +1,14 @@
+/*
+ * client.c — Client en ligne de commande du Chat Hub.
+ *
+ * Deux flux d'activité concurrents :
+ *   - le thread principal lit le clavier (stdin) et envoie les commandes ;
+ *   - un thread de réception (recv_thread) affiche les messages du serveur.
+ * Le drapeau partagé « running » coordonne leur arrêt.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -12,22 +20,24 @@
 
 static volatile int running = 1;
 
-typedef struct {
-    line_reader_t *lr;
-} recv_arg_t;
-
+/* Réaffiche l'invite de saisie. */
 static void redraw_prompt(void) {
     printf("> ");
     fflush(stdout);
 }
 
+/* Thread de réception : affiche en continu les lignes envoyées par le serveur.
+ *
+ * Pour ne pas abîmer la ligne en cours de saisie, on efface d'abord la ligne
+ * courante du terminal (séquence \r\033[K), on affiche l'évènement, puis on
+ * réaffiche l'invite. L'argument est le line_reader_t de la socket. */
 static void *recv_thread(void *arg) {
-    recv_arg_t *a = arg;
+    line_reader_t *lr = arg;
     char line[BUF_SIZE];
 
     while (running) {
-        int r = lr_next(a->lr, line, sizeof(line));
-        if (r <= 0) {
+        if (lr_next(lr, line, sizeof(line)) <= 0) {
+            /* 0 ou -1 : le serveur a fermé la connexion. */
             if (running) {
                 printf("\r\033[K[disconnected from server]\n");
                 fflush(stdout);
@@ -35,14 +45,15 @@ static void *recv_thread(void *arg) {
             }
             return NULL;
         }
-        /* Wipe the prompt line, print the event, redraw the prompt. */
-        printf("\r\033[K");
+        printf("\r\033[K");                  /* efface l'invite courante */
         if (strncmp(line, "MSG ", 4) == 0) {
+            /* "MSG <de> <texte>" → "de: texte" */
             const char *rest = line + 4;
             const char *sp   = strchr(rest, ' ');
             if (sp)
                 printf("%.*s: %s\n", (int)(sp - rest), rest, sp + 1);
         } else if (strncmp(line, "PRIV ", 5) == 0) {
+            /* "PRIV <de> <texte>" → message privé */
             const char *rest = line + 5;
             const char *sp   = strchr(rest, ' ');
             if (sp)
@@ -59,7 +70,7 @@ static void *recv_thread(void *arg) {
         } else if (strncmp(line, "SYS ", 4) == 0) {
             printf("[sys] %s\n", line + 4);
         } else if (strcmp(line, "OK") == 0) {
-            /* Only expected during handshake; ignored mid-chat. */
+            /* Attendu uniquement pendant la poignée de main ; ignoré ensuite. */
         } else {
             printf("%s\n", line);
         }
@@ -68,7 +79,9 @@ static void *recv_thread(void *arg) {
     return NULL;
 }
 
-/* Loop NICK ↔ OK/ERR until the server accepts a name. Returns 0 on success. */
+/* Poignée de main : envoie NICK <pseudo> et attend OK/ERR, en redemandant un
+   pseudo tant que le serveur le refuse. Renvoie 0 dès qu'un pseudo est accepté
+   (recopié dans out_name), -1 si la connexion est perdue. */
 static int handshake(int fd, line_reader_t *lr, char *out_name, size_t cap) {
     char nick[NAME_SIZE];
     char line[BUF_SIZE];
@@ -78,16 +91,15 @@ static int handshake(int fd, line_reader_t *lr, char *out_name, size_t cap) {
         printf("Pseudo: ");
         fflush(stdout);
         if (!fgets(nick, sizeof(nick), stdin)) return -1;
-        nick[strcspn(nick, "\n")] = '\0';
-        if (nick[0] == '\0') continue;
+        nick[strcspn(nick, "\n")] = '\0';    /* retire le saut de ligne */
+        if (nick[0] == '\0') continue;       /* saisie vide : on redemande */
 
         snprintf(msg, sizeof(msg), "NICK %s", nick);
         if (send_line(fd, msg) < 0) {
             fprintf(stderr, "send failed\n");
             return -1;
         }
-        int r = lr_next(lr, line, sizeof(line));
-        if (r <= 0) {
+        if (lr_next(lr, line, sizeof(line)) <= 0) {
             fprintf(stderr, "Server closed connection.\n");
             return -1;
         }
@@ -98,12 +110,13 @@ static int handshake(int fd, line_reader_t *lr, char *out_name, size_t cap) {
         }
         if (strncmp(line, "ERR ", 4) == 0) {
             printf("[error] %s\n", line + 4);
-            continue;
+            continue;                        /* pseudo refusé : on réessaie */
         }
         printf("Unexpected reply: %s\n", line);
     }
 }
 
+/* Résout host:port et ouvre une connexion TCP. Renvoie le descripteur, ou -1. */
 static int connect_to(const char *host, int port) {
     char portstr[16];
     snprintf(portstr, sizeof(portstr), "%d", port);
@@ -142,6 +155,7 @@ int main(int argc, char *argv[]) {
     const char *host = NULL;
     int         port = 0;
 
+    /* Analyse des arguments : --server <hôte> et --port <n> (obligatoires). */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--server") == 0 && i + 1 < argc) {
             host = argv[++i];
@@ -157,7 +171,7 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    signal(SIGPIPE, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN);     /* serveur disparu : send() renvoie -1 */
 
     int fd = connect_to(host, port);
     if (fd < 0) return EXIT_FAILURE;
@@ -174,15 +188,16 @@ int main(int argc, char *argv[]) {
     printf("Commandes: /msg <pseudo> <texte> | /users | /quit\n");
     redraw_prompt();
 
+    /* Lance le thread de réception en lui passant directement le lecteur. */
     pthread_t tid;
-    recv_arg_t ra = { .lr = &lr };
-    if (pthread_create(&tid, NULL, recv_thread, &ra) != 0) {
+    if (pthread_create(&tid, NULL, recv_thread, &lr) != 0) {
         perror("pthread_create");
         close(fd);
         return EXIT_FAILURE;
     }
 
-    /* Keep input below BUF_SIZE so the wire prefix always fits in msg[]. */
+    /* On borne la saisie sous BUF_SIZE pour que le préfixe protocolaire
+       ("MSG ", etc.) tienne toujours dans msg[]. */
     char line[BUF_SIZE - NAME_SIZE - 16];
     while (running && fgets(line, sizeof(line), stdin)) {
         line[strcspn(line, "\n")] = '\0';
@@ -198,6 +213,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (strncmp(line, "/msg ", 5) == 0) {
+            /* "/msg <pseudo> <texte>" → "PRIV <pseudo> <texte>" */
             const char *rest = line + 5;
             const char *sp   = strchr(rest, ' ');
             if (!sp || sp == rest) {
@@ -223,12 +239,14 @@ int main(int argc, char *argv[]) {
             redraw_prompt();
             continue;
         }
+        /* Texte ordinaire → message public diffusé à tous. */
         char msg[BUF_SIZE];
         snprintf(msg, sizeof(msg), "MSG %s", line);
         send_line(fd, msg);
         redraw_prompt();
     }
 
+    /* Arrêt : on réveille le thread de réception en fermant la socket. */
     running = 0;
     shutdown(fd, SHUT_RDWR);
     pthread_join(tid, NULL);

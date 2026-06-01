@@ -1,80 +1,105 @@
-# Chat Hub — Application de Chat Centralisée
+# Chat Hub — Application de chat centralisée
 
-Serveur unique (Chat Hub) en architecture client–serveur. Tous les messages
-échangés entre les clients transitent obligatoirement par le serveur.
+Application de discussion en architecture **client–serveur**. Un serveur unique,
+le *Chat Hub*, relaie tous les messages : aucun client ne communique directement
+avec un autre. Plusieurs utilisateurs peuvent discuter en temps réel, soit dans
+le **salon général** (diffusion à tous), soit en **message privé** (acheminé
+vers un seul destinataire).
 
-## Choix techniques
+## Organisation du code
 
-| Aspect            | Choix                                | Justification                                          |
-|-------------------|--------------------------------------|--------------------------------------------------------|
-| Langage           | C (C11)                              | Cohérent avec les TP précédents `sockets1`, `sockets2` |
-| Protocole         | TCP/IP                               | Ordre FIFO garanti, détection de déconnexion native    |
-| Concurrence       | `pthread` (un thread par client)     | Modèle simple, lisible, suffisant pour ≤ 64 clients    |
-| Format wire       | texte, lignes terminées par `\n`     | Inspectable au `nc`, facile à étendre                  |
-| Interface client  | CLI (ligne de commande)              | Pas de dépendance graphique                            |
-| Journal optionnel | `--log <fichier>` côté serveur       | Trace horodatée des évènements (JOIN/MSG/PRIV/LEAVE)   |
+Séparation claire serveur / client, avec un en-tête commun pour le protocole :
 
-## Dépendances et compilation
+| Fichier      | Rôle                                                                    |
+|--------------|-------------------------------------------------------------------------|
+| `common.h`   | Protocole « fil », lecteur de lignes (`line_reader_t`), envoi fiable.    |
+| `server.c`   | Le serveur `chat_serverd` : accept, threads clients, table, diffusion.   |
+| `client.c`   | Le client `chat_client` : connexion, saisie clavier, affichage temps réel.|
+| `Makefile`   | Compilation des deux binaires.                                           |
 
-Nécessite uniquement `gcc` et la libc POSIX (Linux). Aucune bibliothèque tierce.
+---
+
+## 1. Dépendances et compilation
+
+Aucune bibliothèque tierce : uniquement **`gcc`** et la **libc POSIX** (Linux).
+La concurrence repose sur `pthread`.
 
 ```bash
 make            # produit ./chat_serverd et ./chat_client
-make clean
+make clean      # supprime les binaires
 ```
 
-## Exécution
+Le `Makefile` compile avec `-Wall -Wextra -pthread` (compilation sans
+avertissement).
+
+---
+
+## 2. Exécution (serveur puis clients)
+
+Lancer **d'abord le serveur**, puis autant de clients que voulu.
 
 ```bash
 # Terminal serveur
-./chat_serverd --port 5555
-./chat_serverd --port 5555 --log chat.log   # avec historique
+./chat_serverd --port 5555                  # port d'écoute
+./chat_serverd --port 5555 --log chat.log   # avec historique horodaté
+```
 
-# Terminal client
+```bash
+# Terminal(s) client(s)
 ./chat_client --server localhost --port 5555
 ```
 
-À la connexion, le client demande un pseudo. Si le nom est déjà pris ou invalide
-(caractères autorisés : alphanumériques, `_`, `-`, max 31 caractères), le
-serveur répond `ERR …` et l’utilisateur peut réessayer.
+| Programme       | Option              | Effet                                    | Défaut |
+|-----------------|---------------------|------------------------------------------|--------|
+| `chat_serverd`  | `--port <n>`        | Port d'écoute TCP                        | `5555` |
+| `chat_serverd`  | `--log <fichier>`   | Journalise les évènements (optionnel)    | —      |
+| `chat_client`   | `--server <hôte>`   | Adresse du serveur                       | —      |
+| `chat_client`   | `--port <n>`        | Port du serveur                          | —      |
 
-## Commandes côté client
+À la connexion, le client demande un **pseudo**. S'il est déjà pris ou invalide
+(caractères autorisés : alphanumériques, `_`, `-`, max 31 caractères), le serveur
+répond `ERR …` et l'utilisateur peut réessayer.
 
-| Commande              | Effet                                                       |
-|-----------------------|-------------------------------------------------------------|
-| `<texte>`             | Diffuse `<texte>` à tous les autres clients                 |
-| `/msg <pseudo> <txt>` | Message privé routé vers `<pseudo>` uniquement              |
-| `/users`              | Demande la liste des participants connectés                 |
-| `/quit`               | Déconnexion propre (notifiée aux autres)                    |
+### Commandes côté client
 
-## Protocole de communication
+| Commande                | Effet                                                |
+|-------------------------|------------------------------------------------------|
+| `<texte>`               | Diffuse `<texte>` à tous les autres clients          |
+| `/msg <pseudo> <texte>` | Message privé acheminé vers `<pseudo>` uniquement    |
+| `/users`                | Affiche la liste des participants connectés          |
+| `/quit`                 | Déconnexion propre (notifiée aux autres)             |
 
-Lignes ASCII terminées par `\n`. Le premier *token* est le verbe.
+---
+
+## 3. Protocole de communication
+
+Messages **texte**, **orientés ligne** (terminés par `\n`). Le premier mot est
+le **verbe**. Format inspectable au `nc` et trivial à étendre.
 
 ### Client → Serveur
 
-| Message              | Sémantique                                              |
-|----------------------|---------------------------------------------------------|
-| `NICK <name>`        | Handshake. Doit être le premier message envoyé.         |
-| `MSG <texte>`        | Diffusion à tous les autres clients.                    |
-| `PRIV <name> <txt>`  | Message privé vers `<name>`.                            |
-| `LIST`               | Demande la liste des participants.                      |
-| `QUIT`               | Déconnexion explicite.                                  |
+| Message              | Sémantique                                          |
+|----------------------|-----------------------------------------------------|
+| `NICK <nom>`         | Poignée de main. Doit être le premier message.      |
+| `MSG <texte>`        | Diffusion à tous les autres clients.                |
+| `PRIV <nom> <texte>` | Message privé vers `<nom>`.                         |
+| `LIST`               | Demande la liste des participants.                  |
+| `QUIT`               | Déconnexion explicite.                              |
 
 ### Serveur → Client
 
-| Message              | Sémantique                                              |
-|----------------------|---------------------------------------------------------|
-| `OK`                 | Pseudo accepté (réponse à `NICK`).                      |
-| `ERR <raison>`       | Pseudo refusé ou commande invalide.                     |
-| `MSG <from> <txt>`   | Diffusion reçue d’un autre client.                      |
-| `PRIV <from> <txt>`  | Message privé reçu.                                     |
-| `JOIN <name>`        | Notification d’arrivée.                                 |
-| `LEAVE <name>`       | Notification de départ (propre ou brutale).             |
-| `LIST <n1> <n2> …`   | Réponse à `LIST`.                                       |
-| `SYS <texte>`        | Message système générique.                              |
+| Message              | Sémantique                                          |
+|----------------------|-----------------------------------------------------|
+| `OK`                 | Pseudo accepté (réponse à `NICK`).                  |
+| `ERR <raison>`       | Pseudo refusé ou commande invalide.                 |
+| `MSG <de> <texte>`   | Message public reçu d'un autre client.              |
+| `PRIV <de> <texte>`  | Message privé reçu.                                 |
+| `JOIN <nom>`         | Notification d'arrivée.                             |
+| `LEAVE <nom>`        | Notification de départ (propre ou brutal).          |
+| `LIST <n1> <n2> …`   | Réponse à `LIST`.                                   |
+| `SYS <texte>`        | Message système générique.                          |
 
-Exemple de session brute :
+### Exemple de session (octets bruts)
 
 ```
 C → S : NICK Kamal
@@ -82,86 +107,113 @@ S → C : OK
 S → tous : JOIN Kamal
 C → S : MSG Bonjour tout le monde !
 S → autres : MSG Kamal Bonjour tout le monde !
-C → S : PRIV Said Salut Kamal
-S → Said : PRIV Kamal Salut Kamal
+C → S : PRIV Said Salut Said
+S → Said : PRIV Kamal Salut Said
 C → S : LIST
 S → C : LIST Kamal Said
 C → S : QUIT
 S → tous : LEAVE Kamal
 ```
 
-## Architecture interne
+---
+
+## 4. Schéma d'architecture
 
 ```
-                       ┌────────────────────────┐
-                       │     Chat Hub (TCP)     │
-                       │                        │
-                       │   accept() ── thread  ─┼──── client 1 (Kamal)
-                       │              ────────  │
-                       │              ─ thread ─┼──── client 2 (Said)
-                       │              ────────  │
-   table clients[] ◄───┼─ mutex                 ▼
-   (fd, pseudo, ts)    └────────────────────────┘
+                        ┌─────────────────────────┐
+                        │      Chat Hub (TCP)     │
+   table clients[]      │                         │
+   ┌───────────────┐    │  accept() ─── thread ───┼──── client 1 (Kamal)
+   │ fd | pseudo|ts│◄───┤              ─────────  │
+   │ fd | pseudo|ts│    │              ─ thread ──┼──── client 2 (Said)
+   └───────────────┘    │              ─────────  │
+        ▲  protégée     │              ─ thread ──┼──── client n …
+        │  par mutex    └─────────────────────────┘
+        └──── diffusion : copie des fd sous verrou, envoi hors verrou
 ```
 
-* Le thread principal du serveur exécute `accept()` en boucle et crée un
-  `pthread` détaché par client.
-* Une table `clients[MAX_CLIENTS]` protégée par `pthread_mutex_t` maintient
-  la liste des connectés (`fd`, pseudo, horodatage).
-* Pour diffuser, on **copie** les `fd` cibles sous verrou puis on libère le
-  verrou avant les `send()`. Cela évite qu’un client lent bloque toute la
-  diffusion. Un `SO_SNDTIMEO` de 5 s borne chaque `send`.
-* `MSG_NOSIGNAL` + `signal(SIGPIPE, SIG_IGN)` empêchent qu’un client
-  disparu fasse mourir le serveur.
+* Le thread principal exécute `accept()` en boucle et crée un **`pthread`
+  détaché par client** (`client_thread`).
+* Une table `clients[MAX_CLIENTS]` (64), protégée par un `pthread_mutex_t`,
+  maintient les connectés : `fd`, pseudo, horodatage de connexion.
+* Côté serveur, chaque client suit un cycle de vie linéaire :
+  `do_handshake` → `JOIN` → `serve_client` (boucle de commandes) → `LEAVE`.
+* Côté client, deux flux concurrents : le **thread principal** lit le clavier,
+  un **thread de réception** affiche les messages entrants.
 
-## Garanties
+---
 
-* **Ordre FIFO** : assuré par TCP par socket, et chaque émission est
-  effectuée par un thread unique.
-* **Déconnexion brutale** : le `recv()` du thread client retourne 0/-1,
-  ce qui déclenche la diffusion d’un `LEAVE` et la libération du slot.
-* **Non-blocage du serveur** : la diffusion ne tient pas le verrou pendant
-  les `send()`, et `SO_SNDTIMEO` empêche un client gelé de bloquer les
-  autres. La boucle `accept()` reste toujours disponible.
-* **Unicité du pseudo** : vérifiée sous verrou avant insertion dans la
-  table ; doublon → `ERR name already taken`.
+## 5. Choix techniques majeurs
 
-## Difficultés rencontrées
+| Aspect            | Choix                              | Justification                                          |
+|-------------------|------------------------------------|--------------------------------------------------------|
+| Langage           | C (C11)                            | Cohérent avec les TP précédents `sockets1`, `sockets2` |
+| Protocole         | TCP/IP                             | Ordre FIFO garanti, détection de déconnexion native    |
+| Concurrence       | `pthread` (un thread par client)   | Modèle simple et lisible, suffisant pour ≤ 64 clients  |
+| Format des messages| texte, lignes `\n`                | Inspectable au `nc`, facile à documenter et à étendre  |
+| Interface client  | CLI (terminal)                     | Pas de dépendance graphique                            |
+| Journal           | `--log <fichier>` (optionnel)      | Trace horodatée des évènements JOIN/MSG/PRIV/LEAVE     |
 
-* **Affichage CLI concurrent.** Les messages entrants doivent s’insérer
-  proprement même quand l’utilisateur est en train de saisir une commande.
-  La séquence `\r\033[K` (retour ligne + effacement) est imprimée avant
-  chaque message reçu, puis le prompt `> ` est réaffiché.
-* **Fragmentation TCP.** Le code n’assume jamais qu’un `recv()` renvoie une
-  ligne complète : un `line_reader_t` (dans `common.h`) bufferise les
-  octets et ne livre que des lignes complètes au code applicatif.
-* **Slow client.** Les `send()` de diffusion sont effectués hors verrou et
-  avec un timeout pour éviter qu’un client gelé fige le serveur.
+### Difficultés rencontrées
+
+* **Affichage CLI concurrent.** Un message entrant peut arriver pendant que
+  l'utilisateur saisit une commande. Avant chaque affichage, le client efface
+  la ligne courante (`\r\033[K`) puis réaffiche l'invite `> `.
+* **Fragmentation TCP.** TCP est un flux d'octets sans frontières de message :
+  un `recv()` peut renvoyer une demi-ligne ou plusieurs lignes collées. Le
+  `line_reader_t` (dans `common.h`) bufferise les octets et ne livre que des
+  **lignes complètes** au code applicatif.
+* **Client lent.** Un `send()` vers un client gelé pourrait bloquer la
+  diffusion. La diffusion **copie les `fd` cibles sous verrou puis envoie hors
+  verrou**, et un `SO_SNDTIMEO` de 5 s borne chaque envoi.
+* **Robustesse aux déconnexions.** `MSG_NOSIGNAL` + `signal(SIGPIPE, SIG_IGN)`
+  empêchent qu'un client disparu fasse mourir le serveur ; un `recv()` qui
+  renvoie 0/-1 déclenche proprement la diffusion d'un `LEAVE`.
+
+---
+
+## Garanties attendues
+
+* **Ordre FIFO** : assuré par TCP par socket ; chaque émission est faite par un
+  seul thread.
+* **Détection des déconnexions brutales** : `recv()` renvoie 0/-1 → libération
+  du slot et notification `LEAVE` aux autres.
+* **Absence d'interblocage / non-blocage du serveur** : la diffusion ne tient
+  pas le verrou pendant les `send()`, et `SO_SNDTIMEO` empêche un client gelé de
+  figer les autres. La boucle `accept()` reste toujours disponible.
+* **Unicité du pseudo** : vérifiée sous verrou avant insertion ; doublon →
+  `ERR name already taken`.
+
+---
 
 ## Jeu de tests
 
-Scénario manuel (cf. capture d’écran attendue dans le sujet) :
+### Scénario manuel
 
-1. Lancer le serveur : `./chat_serverd --port 5555 --log chat.log`
-2. Ouvrir deux terminaux clients :
+1. Démarrer le serveur : `./chat_serverd --port 5555 --log chat.log`
+2. Ouvrir deux clients :
    * Term 1 : `./chat_client --server localhost --port 5555` → pseudo `Kamal`
    * Term 2 : `./chat_client --server localhost --port 5555` → pseudo `Said`
-3. Dans Term 2, taper `Salut !` → Term 1 voit `Said: Salut !`
-4. Dans Term 2, taper `/msg Kamal Coucou en privé` → seul Term 1 voit
-   `[private from Said] Coucou en privé`.
-5. Dans Term 1, taper `/users` → affiche `[users] Kamal Said`.
-6. Dans Term 2, taper `/quit` → Term 1 voit `[*] Said a quitté le chat`.
+3. Term 2 tape `Salut !` → Term 1 affiche `Said: Salut !`
+4. Term 2 tape `/msg Kamal Coucou en privé` → seul Term 1 voit
+   `[private from Said] Coucou en privé`
+5. Term 1 tape `/users` → affiche `[users] Kamal Said`
+6. Term 2 tape `/quit` → Term 1 voit `[*] Said a quitté le chat`
 7. Vérifier que `chat.log` contient les évènements horodatés.
 
-Tests automatiques rapides (voir aussi commande `bash` ci-dessous) :
+### Vérifications rapides
 
 * Pseudo en doublon → `[error] name already taken`
-* Pseudo avec espaces → `[error] invalid name (alnum, _-, max 31 chars)`
+* Pseudo avec espaces / caractères interdits →
+  `[error] invalid name (alnum, _-, max 31 chars)`
+* Inspection au `nc` : `nc localhost 5555` puis taper `NICK Test` → `OK`.
+
+---
 
 ## Extensions possibles
 
-* **Sécurité** : ajouter TLS via OpenSSL, ou un mot de passe par pseudo.
-* **UDP** : le protocole étant texte ligne-à-ligne, un mode UDP est
-  trivial à ajouter (un datagramme = une ligne).
-* **Salons multiples** : remplacer la diffusion globale par un mapping
-  pseudo → canal et router `MSG` au canal courant.
+* **Sécurité** : TLS via OpenSSL, ou authentification par mot de passe.
+* **Salons multiples** : remplacer la diffusion globale par un routage
+  pseudo → canal.
+* **UDP** : le protocole étant texte ligne à ligne, un mode datagramme
+  (un datagramme = une ligne) serait simple à ajouter.

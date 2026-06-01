@@ -1,0 +1,986 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{booktabs}
+\usepackage{fancyhdr}
+\usepackage{lmodern}
+
+\setlength{\headheight}{14.5pt}
+
+% ── style des blocs de code ───────────────────────────────────────────────────
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{keyword}{HTML}{0000CC}
+\definecolor{comment}{HTML}{007700}
+\definecolor{string}{HTML}{CC0000}
+\definecolor{linenum}{HTML}{888888}
+
+\lstdefinestyle{cstyle}{
+    language=C,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{keyword}\bfseries,
+    commentstyle=\color{comment}\itshape,
+    stringstyle=\color{string},
+    numberstyle=\tiny\color{linenum},
+    numbers=left,
+    numbersep=8pt,
+    stepnumber=1,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    frame=single,
+    framesep=4pt,
+    xleftmargin=16pt,
+    xrightmargin=4pt,
+    captionpos=b,
+}
+
+\lstset{style=cstyle}
+
+% ── en-tête et pied de page ───────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Sockets 3, Programmation Système}
+\lhead{Chat Hub Multi-clients}
+\cfoot{\thepage}
+
+% ── document ──────────────────────────────────────────────────────────────────
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\Huge\bfseries Chat Hub Multi-clients\par}
+    \vspace{0.5cm}
+    {\Large Programmation Système en C, Sockets 3\par}
+    \vspace{2cm}
+    \rule{\linewidth}{0.4pt}\\[0.4cm]
+    {\large Serveur de chat multi-clients avec protocole texte et threads détachés\par}
+    \rule{\linewidth}{0.4pt}
+    \vfill
+    {\large Ilyass Bougati\par}
+    \vspace{0.3cm}
+    {\large \today\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ── Introduction ──────────────────────────────────────────────────────────────
+\section{Introduction}
+
+Ce projet est l'évolution naturelle du chat full-duplex (\emph{Sockets 2}).
+Les projets précédents ne mettaient en relation que \emph{deux} interlocuteurs
+à la fois. Ici, le serveur devient un \textbf{hub} : il accepte jusqu'à
+\texttt{MAX\_CLIENTS} (64) connexions simultanées et redistribue les messages
+à l'ensemble des participants connectés.
+
+Deux nouveautés architecturales accompagnent ce passage au multi-clients :
+
+\begin{itemize}
+    \item Un \textbf{protocole texte structuré} (verbes \texttt{NICK},
+          \texttt{MSG}, \texttt{PRIV}, \texttt{LIST}, \texttt{QUIT}\ldots)
+          remplace le flux brut des projets précédents.
+    \item Un \textbf{fil d'exécution détaché} est créé pour chaque client,
+          accompagné d'un tableau partagé protégé par un mutex.
+\end{itemize}
+
+Le code est organisé en trois fichiers : \texttt{common.h} (protocole partagé
+et utilitaires réseau), \texttt{server.c} (hub) et \texttt{client.c}
+(interface utilisateur).
+
+% ── Protocole applicatif ──────────────────────────────────────────────────────
+\section{Protocole applicatif}
+
+\subsection{Format des messages}
+
+Tous les messages sont des \textbf{lignes de texte} terminées par
+\texttt{\textbackslash n}. Le premier mot de chaque ligne est le
+\emph{verbe} ; les arguments suivent, séparés par des espaces. Le lecteur de
+lignes accepte aussi le terminateur CRLF (\texttt{\textbackslash r\textbackslash n})
+pour la tolérance avec des outils comme \texttt{telnet} ou \texttt{netcat}.
+
+\subsection{Verbes client $\to$ serveur}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Verbe & Syntaxe & Description \\
+\midrule
+\texttt{NICK} & \texttt{NICK <pseudo>} & Choisir un pseudonyme (handshake) \\
+\texttt{MSG}  & \texttt{MSG <texte>}   & Diffuser un message à tous \\
+\texttt{PRIV} & \texttt{PRIV <pseudo> <texte>} & Message privé \\
+\texttt{LIST} & \texttt{LIST}          & Demander la liste des connectés \\
+\texttt{QUIT} & \texttt{QUIT}          & Quitter proprement \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Verbes serveur $\to$ client}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Verbe & Syntaxe & Description \\
+\midrule
+\texttt{OK}    & \texttt{OK}                     & Handshake accepté \\
+\texttt{ERR}   & \texttt{ERR <raison>}            & Erreur applicative \\
+\texttt{MSG}   & \texttt{MSG <from> <texte>}      & Message reçu de \texttt{from} \\
+\texttt{PRIV}  & \texttt{PRIV <from> <texte>}     & Message privé reçu \\
+\texttt{JOIN}  & \texttt{JOIN <pseudo>}            & Notification d'arrivée \\
+\texttt{LEAVE} & \texttt{LEAVE <pseudo>}           & Notification de départ \\
+\texttt{LIST}  & \texttt{LIST <p1> <p2> \ldots}   & Liste des connectés \\
+\texttt{SYS}   & \texttt{SYS <texte>}             & Message système \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Handshake de connexion}
+
+À la connexion, le client doit s'identifier avant de pouvoir envoyer quoi que
+ce soit :
+
+\begin{enumerate}
+    \item Le client envoie \texttt{NICK <pseudo>}.
+    \item Le serveur répond \texttt{OK} si le pseudo est valide et disponible,
+          ou \texttt{ERR <raison>} sinon.
+    \item Le client peut réessayer avec un autre pseudo en cas d'erreur.
+\end{enumerate}
+
+Le pseudo n'accepte que des caractères alphanumériques, \texttt{\_} et
+\texttt{-} (au plus 31 caractères). Cette validation est effectuée par la
+fonction \texttt{valid\_name()} côté serveur.
+
+% ── Architecture ──────────────────────────────────────────────────────────────
+\section{Architecture du serveur}
+
+\subsection{Modèle de threading}
+
+Le serveur suit le modèle classique \emph{un fil par client} :
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Fil & Rôle & Cycle de vie \\
+\midrule
+Principal & \texttt{accept()} en boucle & Durée de vie du processus \\
+\texttt{client\_thread} & Gérer un client (lecture + dispatch) & Durée de la connexion \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Les fils clients sont créés avec \texttt{pthread\_create} puis
+\textbf{détachés} immédiatement via \texttt{pthread\_detach}. Le serveur
+n'attend donc jamais leur terminaison (\texttt{pthread\_join}) : chaque fil
+libère ses ressources automatiquement en sortant.
+
+\subsection{Table des clients et exclusion mutuelle}
+
+L'état partagé est un tableau global \texttt{clients[MAX\_CLIENTS]} de type
+\texttt{client\_t} :
+
+\begin{lstlisting}[caption={Structure d'un client enregistré}]
+typedef struct {
+    int    fd;
+    char   name[NAME_SIZE];
+    time_t joined_at;
+    int    in_use;
+} client_t;
+\end{lstlisting}
+
+Toute lecture ou écriture de ce tableau est protégée par
+\texttt{clients\_mu} (un \texttt{pthread\_mutex\_t} statique). Le journal
+d'événements dispose de son propre mutex \texttt{log\_mu} pour éviter
+l'entrelacement des lignes entre fils.
+
+\subsection{Diffusion sans blocage}
+
+La fonction \texttt{broadcast()} est conçue pour qu'un client lent ne bloque
+pas les autres :
+
+\begin{enumerate}
+    \item Elle prend un \emph{instantané} des descripteurs actifs sous verrou.
+    \item Elle relâche le verrou avant d'appeler \texttt{send\_line} sur chaque
+          descripteur.
+\end{enumerate}
+
+De plus, chaque descripteur de client se voit appliquer une option
+\texttt{SO\_SNDTIMEO} de 5 secondes dès l'acceptation de la connexion.
+Un envoi qui dépasse ce délai échoue immédiatement plutôt que de bloquer
+indéfiniment le fil de diffusion.
+
+\subsection{Lecteur de lignes bufférisé (\texttt{line\_reader\_t})}
+
+TCP est un protocole de flux : un seul \texttt{recv} peut ramener plusieurs
+messages, ou un message peut arriver en plusieurs fragments. La structure
+\texttt{line\_reader\_t} définie dans \texttt{common.h} gère cette
+problématique avec un tampon interne de \texttt{2\,×\,BUF\_SIZE} octets :
+
+\begin{lstlisting}[caption={\texttt{lr\_next}, lecture d'une ligne complète}]
+static inline int lr_next(line_reader_t *lr, char *out, size_t out_cap) {
+    for (;;) {
+        char *nl = memchr(lr->buf, '\n', lr->len);
+        if (nl) {
+            /* Une ligne complete est disponible : la copier et decaler. */
+            ...
+            return 1;
+        }
+        if (lr->len >= sizeof(lr->buf))
+            lr->len = 0; /* ligne trop longue : on la jette */
+        ssize_t n = recv(lr->fd, lr->buf + lr->len, ...);
+        if (n <= 0) return n; /* fermeture ou erreur */
+        lr->len += (size_t)n;
+    }
+}
+\end{lstlisting}
+
+\texttt{lr\_next} retourne 1 si une ligne a été produite, 0 en cas de
+fermeture propre par le pair, et -1 en cas d'erreur.
+
+% ── Architecture du client ────────────────────────────────────────────────────
+\section{Architecture du client}
+
+Le client reprend le modèle à deux fils introduit dans \emph{Sockets 2} :
+
+\begin{itemize}
+    \item Le \textbf{fil principal} lit l'entrée standard et envoie des
+          commandes au serveur.
+    \item Le \textbf{fil de réception} (\texttt{recv\_thread}) lit les lignes
+          entrantes et les affiche, en effaçant d'abord le prompt avec la
+          séquence ANSI \texttt{\textbackslash r\textbackslash 033[K}.
+\end{itemize}
+
+La résolution du nom d'hôte utilise \texttt{getaddrinfo} (plutôt que
+\texttt{inet\_pton}), ce qui permet de se connecter par nom DNS en plus de
+l'adresse IP.
+
+\subsection{Commandes utilisateur}
+
+Le client traduit les commandes saisies par l'utilisateur en verbes de
+protocole :
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Saisie utilisateur & Verbe envoyé \\
+\midrule
+\texttt{/users} & \texttt{LIST} \\
+\texttt{/msg <pseudo> <texte>} & \texttt{PRIV <pseudo> <texte>} \\
+\texttt{/quit} & \texttt{QUIT} \\
+\textit{(texte libre)} & \texttt{MSG <texte>} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ── Appels système et API ─────────────────────────────────────────────────────
+\section{Appels système et API utilisés}
+
+\begin{description}
+    \item[\texttt{socket} / \texttt{bind} / \texttt{listen} / \texttt{accept} / \texttt{connect}]
+        Infrastructure TCP standard, identique aux projets précédents.
+    \item[\texttt{send} / \texttt{recv}]
+        Envoi et réception de données. \texttt{send\_all} boucle sur
+        \texttt{send} pour garantir l'envoi complet de chaque ligne.
+        \texttt{MSG\_NOSIGNAL} empêche la génération d'un \texttt{SIGPIPE}
+        si le pair a fermé la connexion.
+    \item[\texttt{pthread\_create} / \texttt{pthread\_detach}]
+        Un fil par client, détaché pour que sa terminaison libère ses
+        ressources sans \texttt{pthread\_join}.
+    \item[\texttt{pthread\_mutex\_lock} / \texttt{pthread\_mutex\_unlock}]
+        Protection du tableau \texttt{clients[]} et du fichier de journal.
+    \item[\texttt{setsockopt(SO\_REUSEADDR)}]
+        Redémarrage rapide du serveur sans attendre l'expiration de
+        \texttt{TIME\_WAIT}.
+    \item[\texttt{setsockopt(SO\_SNDTIMEO)}]
+        Délai maximal de 5 secondes par envoi, pour éviter qu'un client
+        lent ne bloque les diffusions vers les autres.
+    \item[\texttt{shutdown(SHUT\_RDWR)}]
+        Déconnexion propre : débloque les \texttt{recv} bloquants des deux
+        côtés avant la fermeture du descripteur.
+    \item[\texttt{signal(SIGPIPE, SIG\_IGN)}]
+        Ignorer \texttt{SIGPIPE} pour que l'écriture sur une socket fermée
+        retourne une erreur plutôt que de tuer le processus.
+    \item[\texttt{signal(SIGINT, ...)}]
+        Fermeture propre du serveur (descripteur d'écoute + fichier log)
+        sur Ctrl+C.
+    \item[\texttt{getaddrinfo} / \texttt{freeaddrinfo}]
+        Résolution DNS côté client, permettant de spécifier un nom d'hôte
+        en plus d'une adresse IP.
+    \item[\texttt{localtime\_r} / \texttt{strftime}]
+        Horodatage thread-safe des entrées du journal (version réentrante
+        de \texttt{localtime}).
+\end{description}
+
+% ── Utilisation ───────────────────────────────────────────────────────────────
+\section{Utilisation}
+
+\begin{lstlisting}[language=bash, style=cstyle]
+# Terminal 1 : lancer le hub sur le port 5555 avec journal
+./chat_serverd --port 5555 --log chat.log
+
+# Terminal 2, 3, ... : connecter des clients
+./chat_client --server 127.0.0.1 --port 5555
+\end{lstlisting}
+
+Une fois connecté, les commandes disponibles sont :
+
+\begin{lstlisting}[language=bash, style=cstyle]
+/users               # lister les utilisateurs connectes
+/msg alice bonjour   # envoyer un message prive a alice
+/quit                # quitter proprement
+bonjour a tous       # diffuser a tout le salon
+\end{lstlisting}
+
+La compilation requiert l'option \texttt{-pthread} (déjà présente dans le
+\texttt{Makefile}) pour lier la bibliothèque POSIX Threads.
+
+% ── Code source ───────────────────────────────────────────────────────────────
+\section{Code source}
+
+\subsection{\texttt{common.h}}
+
+\begin{lstlisting}[caption={\texttt{common.h}, protocole, constantes et utilitaires réseau}]
+#ifndef HUB_COMMON_H
+#define HUB_COMMON_H
+
+#include <stddef.h>
+#include <string.h>
+#include <sys/socket.h>
+
+#define BUF_SIZE     1024
+#define NAME_SIZE      32
+#define MAX_CLIENTS    64
+
+/* Wire protocol -- line-based, '\n' terminated, first token is the verb.
+ *
+ * Client -> Server:
+ *   NICK <name>
+ *   MSG  <text>
+ *   PRIV <name> <text>
+ *   LIST
+ *   QUIT
+ *
+ * Server -> Client:
+ *   OK
+ *   ERR  <reason>
+ *   MSG  <from> <text>
+ *   PRIV <from> <text>
+ *   JOIN <name>
+ *   LEAVE <name>
+ *   LIST <name1> <name2> ...
+ *   SYS  <text>
+ */
+
+typedef struct {
+    int    fd;
+    char   buf[BUF_SIZE * 2];
+    size_t len;
+} line_reader_t;
+
+static inline void lr_init(line_reader_t *lr, int fd) {
+    lr->fd = fd;
+    lr->len = 0;
+}
+
+static inline int lr_next(line_reader_t *lr, char *out, size_t out_cap) {
+    for (;;) {
+        char *nl = memchr(lr->buf, '\n', lr->len);
+        if (nl) {
+            size_t line_len = (size_t)(nl - lr->buf);
+            size_t copy = line_len < out_cap - 1 ? line_len : out_cap - 1;
+            memcpy(out, lr->buf, copy);
+            out[copy] = '\0';
+            if (copy > 0 && out[copy - 1] == '\r')
+                out[copy - 1] = '\0';
+            size_t consumed = line_len + 1;
+            memmove(lr->buf, lr->buf + consumed, lr->len - consumed);
+            lr->len -= consumed;
+            return 1;
+        }
+        if (lr->len >= sizeof(lr->buf))
+            lr->len = 0;
+        ssize_t n = recv(lr->fd, lr->buf + lr->len,
+                         sizeof(lr->buf) - lr->len, 0);
+        if (n == 0) return 0;
+        if (n  < 0) return -1;
+        lr->len += (size_t)n;
+    }
+}
+
+static inline int send_all(int fd, const char *data, size_t len) {
+    while (len > 0) {
+        ssize_t n = send(fd, data, len, MSG_NOSIGNAL);
+        if (n <= 0) return -1;
+        data += n;
+        len  -= (size_t)n;
+    }
+    return 0;
+}
+
+static inline int send_line(int fd, const char *line) {
+    size_t len = strlen(line);
+    if (send_all(fd, line, len) < 0) return -1;
+    return send_all(fd, "\n", 1);
+}
+
+#endif
+\end{lstlisting}
+
+\subsection{\texttt{server.c}}
+
+\begin{lstlisting}[caption={\texttt{server.c}, hub de chat multi-clients}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <pthread.h>
+#include <arpa/inet.h>
+#include <time.h>
+#include <ctype.h>
+#include <errno.h>
+
+#include "common.h"
+
+typedef struct {
+    int    fd;
+    char   name[NAME_SIZE];
+    time_t joined_at;
+    int    in_use;
+} client_t;
+
+static client_t        clients[MAX_CLIENTS];
+static pthread_mutex_t clients_mu = PTHREAD_MUTEX_INITIALIZER;
+static int             server_fd  = -1;
+static FILE           *log_fp     = NULL;
+static pthread_mutex_t log_mu     = PTHREAD_MUTEX_INITIALIZER;
+
+static void log_message(const char *fmt, ...) {
+    if (!log_fp) return;
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
+    pthread_mutex_lock(&log_mu);
+    fprintf(log_fp, "%s ", ts);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(log_fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', log_fp);
+    fflush(log_fp);
+    pthread_mutex_unlock(&log_mu);
+}
+
+static int valid_name(const char *s) {
+    if (!*s) return 0;
+    if (strlen(s) >= NAME_SIZE) return 0;
+    for (const char *p = s; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '-'))
+            return 0;
+    }
+    return 1;
+}
+
+static int register_client(int fd, const char *name) {
+    pthread_mutex_lock(&clients_mu);
+    int slot = -1;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].in_use && strcmp(clients[i].name, name) == 0) {
+            pthread_mutex_unlock(&clients_mu);
+            return -1;
+        }
+        if (slot < 0 && !clients[i].in_use)
+            slot = i;
+    }
+    if (slot < 0) {
+        pthread_mutex_unlock(&clients_mu);
+        return -2;
+    }
+    clients[slot].fd        = fd;
+    clients[slot].joined_at = time(NULL);
+    clients[slot].in_use    = 1;
+    strncpy(clients[slot].name, name, NAME_SIZE - 1);
+    clients[slot].name[NAME_SIZE - 1] = '\0';
+    pthread_mutex_unlock(&clients_mu);
+    return slot;
+}
+
+static void unregister_client(int slot) {
+    pthread_mutex_lock(&clients_mu);
+    clients[slot].in_use  = 0;
+    clients[slot].fd      = -1;
+    clients[slot].name[0] = '\0';
+    pthread_mutex_unlock(&clients_mu);
+}
+
+static void broadcast(const char *line, int except_fd) {
+    int fds[MAX_CLIENTS];
+    int n = 0;
+    pthread_mutex_lock(&clients_mu);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].in_use && clients[i].fd != except_fd)
+            fds[n++] = clients[i].fd;
+    }
+    pthread_mutex_unlock(&clients_mu);
+    for (int i = 0; i < n; i++)
+        (void)send_line(fds[i], line);
+}
+
+static int send_private(const char *target, const char *line) {
+    int fd = -1;
+    pthread_mutex_lock(&clients_mu);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].in_use && strcmp(clients[i].name, target) == 0) {
+            fd = clients[i].fd;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&clients_mu);
+    if (fd < 0) return -1;
+    return send_line(fd, line);
+}
+
+static void handle_list(int fd) {
+    char reply[BUF_SIZE];
+    size_t off = 0;
+    off += (size_t)snprintf(reply + off, sizeof(reply) - off, "LIST");
+    pthread_mutex_lock(&clients_mu);
+    for (int i = 0; i < MAX_CLIENTS && off < sizeof(reply) - 1; i++) {
+        if (clients[i].in_use) {
+            int w = snprintf(reply + off, sizeof(reply) - off,
+                             " %s", clients[i].name);
+            if (w < 0) break;
+            off += (size_t)w;
+        }
+    }
+    pthread_mutex_unlock(&clients_mu);
+    send_line(fd, reply);
+}
+
+static void *client_thread(void *arg) {
+    int fd = (int)(intptr_t)arg;
+    line_reader_t lr;
+    lr_init(&lr, fd);
+
+    char line[BUF_SIZE];
+    char name[NAME_SIZE] = {0};
+    int  slot = -1;
+
+    while (slot < 0) {
+        int r = lr_next(&lr, line, sizeof(line));
+        if (r <= 0) goto done;
+        if (strncmp(line, "NICK ", 5) != 0) {
+            send_line(fd, "ERR expected NICK first");
+            continue;
+        }
+        const char *requested = line + 5;
+        if (!valid_name(requested)) {
+            send_line(fd, "ERR invalid name (alnum, _-, max 31 chars)");
+            continue;
+        }
+        int s = register_client(fd, requested);
+        if (s == -1) { send_line(fd, "ERR name already taken"); continue; }
+        if (s == -2) { send_line(fd, "ERR server full");        goto done; }
+        slot = s;
+        strncpy(name, requested, NAME_SIZE - 1);
+        name[NAME_SIZE - 1] = '\0';
+        send_line(fd, "OK");
+    }
+
+    char ann[BUF_SIZE];
+    snprintf(ann, sizeof(ann), "JOIN %s", name);
+    broadcast(ann, fd);
+    log_message("[JOIN] %s", name);
+
+    for (;;) {
+        int r = lr_next(&lr, line, sizeof(line));
+        if (r <= 0) break;
+        if (strcmp(line, "QUIT") == 0) break;
+        if (strcmp(line, "LIST") == 0) { handle_list(fd); continue; }
+        if (strncmp(line, "MSG ", 4) == 0) {
+            char out[BUF_SIZE];
+            snprintf(out, sizeof(out), "MSG %s %s", name, line + 4);
+            broadcast(out, fd);
+            log_message("[MSG] %s: %s", name, line + 4);
+            continue;
+        }
+        if (strncmp(line, "PRIV ", 5) == 0) {
+            const char *rest = line + 5;
+            const char *sp   = strchr(rest, ' ');
+            if (!sp || sp == rest) {
+                send_line(fd, "ERR usage: PRIV <name> <text>");
+                continue;
+            }
+            size_t tlen = (size_t)(sp - rest);
+            if (tlen >= NAME_SIZE) {
+                send_line(fd, "ERR target name too long");
+                continue;
+            }
+            char target[NAME_SIZE];
+            memcpy(target, rest, tlen);
+            target[tlen] = '\0';
+            if (strcmp(target, name) == 0) {
+                send_line(fd, "ERR cannot PRIV yourself");
+                continue;
+            }
+            char out[BUF_SIZE];
+            snprintf(out, sizeof(out), "PRIV %s %s", name, sp + 1);
+            if (send_private(target, out) < 0) {
+                char err[BUF_SIZE];
+                snprintf(err, sizeof(err), "ERR no such user: %s", target);
+                send_line(fd, err);
+            } else {
+                log_message("[PRIV] %s -> %s: %s", name, target, sp + 1);
+            }
+            continue;
+        }
+        send_line(fd, "ERR unknown command");
+    }
+
+done:
+    if (slot >= 0) {
+        unregister_client(slot);
+        char leave[BUF_SIZE];
+        snprintf(leave, sizeof(leave), "LEAVE %s", name);
+        broadcast(leave, fd);
+        log_message("[LEAVE] %s", name);
+    }
+    shutdown(fd, SHUT_RDWR);
+    close(fd);
+    return NULL;
+}
+
+static void handle_sigint(int sig) {
+    (void)sig;
+    printf("\nShutting down Chat Hub...\n");
+    if (server_fd != -1) close(server_fd);
+    if (log_fp) fclose(log_fp);
+    _exit(0);
+}
+
+int main(int argc, char *argv[]) {
+    int         port     = 5555;
+    const char *log_path = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
+            port = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc)
+            log_path = argv[++i];
+        else {
+            fprintf(stderr, "Usage: %s [--port <port>] [--log <file>]\n",
+                    argv[0]);
+            return EXIT_FAILURE;
+        }
+    }
+    if (log_path) {
+        log_fp = fopen(log_path, "a");
+        if (!log_fp) { perror("fopen log"); return EXIT_FAILURE; }
+    }
+
+    signal(SIGINT,  handle_sigint);
+    signal(SIGPIPE, SIG_IGN);
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) { perror("socket"); return EXIT_FAILURE; }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {
+        .sin_family      = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port        = htons(port),
+    };
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind"); return EXIT_FAILURE;
+    }
+    if (listen(server_fd, 16) < 0) {
+        perror("listen"); return EXIT_FAILURE;
+    }
+    printf("Chat Hub listening on port %d...\n", port);
+
+    for (;;) {
+        struct sockaddr_in cli;
+        socklen_t cl = sizeof(cli);
+        int fd = accept(server_fd, (struct sockaddr *)&cli, &cl);
+        if (fd < 0) {
+            if (errno == EINTR) continue;
+            perror("accept");
+            break;
+        }
+        struct timeval to = { .tv_sec = 5, .tv_usec = 0 };
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, client_thread,
+                           (void *)(intptr_t)fd) != 0) {
+            perror("pthread_create");
+            close(fd);
+            continue;
+        }
+        pthread_detach(tid);
+    }
+
+    if (log_fp) fclose(log_fp);
+    close(server_fd);
+    return 0;
+}
+\end{lstlisting}
+
+\subsection{\texttt{client.c}}
+
+\begin{lstlisting}[caption={\texttt{client.c}, client interactif du hub}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <pthread.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+
+#include "common.h"
+
+static volatile int running = 1;
+
+typedef struct { line_reader_t *lr; } recv_arg_t;
+
+static void redraw_prompt(void) { printf("> "); fflush(stdout); }
+
+static void *recv_thread(void *arg) {
+    recv_arg_t *a = arg;
+    char line[BUF_SIZE];
+
+    while (running) {
+        int r = lr_next(a->lr, line, sizeof(line));
+        if (r <= 0) {
+            if (running) {
+                printf("\r\033[K[disconnected from server]\n");
+                fflush(stdout);
+                running = 0;
+            }
+            return NULL;
+        }
+        printf("\r\033[K");
+        if (strncmp(line, "MSG ", 4) == 0) {
+            const char *rest = line + 4;
+            const char *sp   = strchr(rest, ' ');
+            if (sp)
+                printf("%.*s: %s\n", (int)(sp - rest), rest, sp + 1);
+        } else if (strncmp(line, "PRIV ", 5) == 0) {
+            const char *rest = line + 5;
+            const char *sp   = strchr(rest, ' ');
+            if (sp)
+                printf("[private from %.*s] %s\n",
+                       (int)(sp - rest), rest, sp + 1);
+        } else if (strncmp(line, "JOIN ", 5) == 0) {
+            printf("[*] %s a rejoint le chat\n", line + 5);
+        } else if (strncmp(line, "LEAVE ", 6) == 0) {
+            printf("[*] %s a quitte le chat\n", line + 6);
+        } else if (strcmp(line, "LIST") == 0
+                   || strncmp(line, "LIST ", 5) == 0) {
+            printf("[users]%s\n", line + 4);
+        } else if (strncmp(line, "ERR ", 4) == 0) {
+            printf("[error] %s\n", line + 4);
+        } else if (strcmp(line, "OK") != 0) {
+            printf("%s\n", line);
+        }
+        redraw_prompt();
+    }
+    return NULL;
+}
+
+static int handshake(int fd, line_reader_t *lr,
+                     char *out_name, size_t cap) {
+    char nick[NAME_SIZE], line[BUF_SIZE], msg[BUF_SIZE];
+    for (;;) {
+        printf("Pseudo: ");
+        fflush(stdout);
+        if (!fgets(nick, sizeof(nick), stdin)) return -1;
+        nick[strcspn(nick, "\n")] = '\0';
+        if (nick[0] == '\0') continue;
+        snprintf(msg, sizeof(msg), "NICK %s", nick);
+        if (send_line(fd, msg) < 0) return -1;
+        int r = lr_next(lr, line, sizeof(line));
+        if (r <= 0) return -1;
+        if (strcmp(line, "OK") == 0) {
+            strncpy(out_name, nick, cap - 1);
+            out_name[cap - 1] = '\0';
+            return 0;
+        }
+        if (strncmp(line, "ERR ", 4) == 0)
+            printf("[error] %s\n", line + 4);
+    }
+}
+
+static int connect_to(const char *host, int port) {
+    char portstr[16];
+    snprintf(portstr, sizeof(portstr), "%d", port);
+    struct addrinfo hints = { .ai_family   = AF_INET,
+                              .ai_socktype = SOCK_STREAM };
+    struct addrinfo *res;
+    if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0 || connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+        if (fd >= 0) close(fd);
+        freeaddrinfo(res);
+        return -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+int main(int argc, char *argv[]) {
+    const char *host = NULL;
+    int         port = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--server") == 0 && i + 1 < argc)
+            host = argv[++i];
+        else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
+            port = atoi(argv[++i]);
+        else {
+            fprintf(stderr, "Usage: %s --server <host> --port <port>\n",
+                    argv[0]);
+            return EXIT_FAILURE;
+        }
+    }
+    if (!host || port <= 0 || port > 65535) {
+        fprintf(stderr, "Usage: %s --server <host> --port <port>\n",
+                argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    signal(SIGPIPE, SIG_IGN);
+
+    int fd = connect_to(host, port);
+    if (fd < 0) return EXIT_FAILURE;
+
+    line_reader_t lr;
+    lr_init(&lr, fd);
+
+    char name[NAME_SIZE];
+    if (handshake(fd, &lr, name, sizeof(name)) != 0) {
+        close(fd); return EXIT_FAILURE;
+    }
+    printf("[INFO] Connecte en tant que %s\n", name);
+    printf("Commandes: /msg <pseudo> <texte> | /users | /quit\n");
+    redraw_prompt();
+
+    pthread_t tid;
+    recv_arg_t ra = { .lr = &lr };
+    if (pthread_create(&tid, NULL, recv_thread, &ra) != 0) {
+        perror("pthread_create"); close(fd); return EXIT_FAILURE;
+    }
+
+    char line[BUF_SIZE - NAME_SIZE - 16];
+    while (running && fgets(line, sizeof(line), stdin)) {
+        line[strcspn(line, "\n")] = '\0';
+        if (line[0] == '\0') { redraw_prompt(); continue; }
+
+        if (strcmp(line, "/quit") == 0) {
+            send_line(fd, "QUIT"); running = 0; break;
+        }
+        if (strcmp(line, "/users") == 0) {
+            send_line(fd, "LIST"); continue;
+        }
+        if (strncmp(line, "/msg ", 5) == 0) {
+            const char *rest = line + 5;
+            const char *sp   = strchr(rest, ' ');
+            if (!sp || sp == rest) {
+                printf("Usage: /msg <pseudo> <texte>\n");
+                redraw_prompt(); continue;
+            }
+            char msg[BUF_SIZE];
+            snprintf(msg, sizeof(msg), "PRIV %.*s %s",
+                     (int)(sp - rest), rest, sp + 1);
+            send_line(fd, msg); redraw_prompt(); continue;
+        }
+        if (line[0] == '/') {
+            printf("Commande inconnue. /msg, /users, /quit\n");
+            redraw_prompt(); continue;
+        }
+        char msg[BUF_SIZE];
+        snprintf(msg, sizeof(msg), "MSG %s", line);
+        send_line(fd, msg); redraw_prompt();
+    }
+
+    running = 0;
+    shutdown(fd, SHUT_RDWR);
+    pthread_join(tid, NULL);
+    close(fd);
+    return 0;
+}
+\end{lstlisting}
+
+\subsection{Makefile}
+
+\begin{lstlisting}[language=make, caption={Makefile, compilation du hub et du client}]
+CC = gcc
+CFLAGS = -Wall -Wextra -pthread
+
+all: chat_serverd chat_client
+
+chat_serverd: server.c common.h
+	$(CC) $(CFLAGS) -o $@ server.c
+
+chat_client: client.c common.h
+	$(CC) $(CFLAGS) -o $@ client.c
+
+clean:
+	rm -f chat_serverd chat_client
+
+.PHONY: all clean
+\end{lstlisting}
+
+% ── Comparaison des trois projets ─────────────────────────────────────────────
+\section{Comparaison des trois projets}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Aspect & Sockets 1 & Sockets 2 & Sockets 3 (Hub) \\
+\midrule
+Clients simultanés & 1 & 1 & Jusqu'à 64 \\
+Mode de communication & Semi-duplex & Full-duplex & Full-duplex (salon) \\
+Threads côté serveur & 0 & 1 par connexion & 1 par client (détaché) \\
+Gestion des threads &, & \texttt{pthread\_join} & \texttt{pthread\_detach} \\
+Protocole & Flux brut & Flux brut & Lignes texte structurées \\
+Messages privés & Non & Non & Oui (\texttt{PRIV}) \\
+Liste des connectés & Non & Non & Oui (\texttt{LIST}) \\
+Journal persistant & Non & Non & Optionnel (\texttt{--log}) \\
+Résolution DNS & Non & Non & Oui (\texttt{getaddrinfo}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ── Bilan ─────────────────────────────────────────────────────────────────────
+\section{Bilan}
+
+Ce projet illustre les défis supplémentaires qu'introduit le passage d'un chat
+à deux à un salon multi-clients : la nécessité de protéger un état partagé
+(tableau des clients) par des mutex, l'importance de ne pas maintenir le verrou
+pendant les envois réseau pour ne pas bloquer les autres fils, et l'utilisation
+de \texttt{pthread\_detach} comme alternative à \texttt{pthread\_join} quand le
+fil principal n'a pas besoin d'attendre la terminaison de chaque client.
+
+L'introduction d'un protocole texte structuré est également une avancée
+significative : elle découple clairement le format fil-à-fil de la logique
+applicative et rend le serveur interopérable avec n'importe quel client
+capable de parler le protocole, y compris \texttt{telnet} ou \texttt{netcat}.
+
+\end{document}
