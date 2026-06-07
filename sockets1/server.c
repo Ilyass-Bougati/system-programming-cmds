@@ -2,36 +2,33 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <signal.h>
 #include <arpa/inet.h>
 
+// defining the buffer sizes for the usernames and the messages
 #define BUF_SIZE 1024
 #define NAME_SIZE 64
 
-static int server_fd = -1;
-
-static void handle_sigint(int sig) {
-    (void)sig;
-    printf("\nClosing the server application...\n");
-    if (server_fd != -1)
-        close(server_fd);
-    exit(0);
-}
-
-void chat(int client_fd) {
+// the chat function
+void chats(int client_fd) {
+    // initializing the variables (usernames, and message buffer)
     char my_name[NAME_SIZE];
     char their_name[NAME_SIZE];
     char buf[BUF_SIZE];
     ssize_t n;
 
+    // reading the user's username
     printf("Enter your username: ");
-    fflush(stdout);
+    fflush(stdout); // this isn't necessary
+
+    // reading the user provided username
     if (!fgets(my_name, sizeof(my_name), stdin))
         return;
     my_name[strcspn(my_name, "\n")] = '\0';
 
+    // sending username
     send(client_fd, my_name, strlen(my_name), 0);
 
+    // listening for response (the other users's username)
     n = recv(client_fd, their_name, sizeof(their_name) - 1, 0);
     if (n <= 0)
         return;
@@ -39,7 +36,9 @@ void chat(int client_fd) {
 
     printf("%s joined the chat. They go first.\n", their_name);
 
+    // chatting
     while (1) {
+        // receiving the message
         n = recv(client_fd, buf, sizeof(buf) - 1, 0);
         if (n <= 0) {
             printf("%s disconnected.\n", their_name);
@@ -47,12 +46,14 @@ void chat(int client_fd) {
         }
         buf[n] = '\0';
 
+        // checking for quit instruction and showing the message if not
         if (strcmp(buf, "/quit") == 0) {
             printf("%s left the chat.\n", their_name);
             break;
         }
         printf("%s: %s\n", their_name, buf);
 
+        // prompting the user for a message
         printf("%s: ", my_name);
         fflush(stdout);
         if (!fgets(buf, sizeof(buf), stdin))
@@ -65,11 +66,13 @@ void chat(int client_fd) {
             break;
     }
 
+    // housekeeping
     close(client_fd);
     printf("Chat ended. Waiting for a new connection...\n\n");
 }
 
 int main(int argc, char *argv[]) {
+    // assuring the user providede a port
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <port>\n", argv[0]);
         exit(EXIT_FAILURE);
@@ -81,12 +84,12 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    signal(SIGINT, handle_sigint);
-
-    int client_fd;
+    // initializing the variables
+    int server_fd, client_fd;
     struct sockaddr_in address;
     socklen_t addr_len = sizeof(address);
 
+    // creating the socket
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
@@ -100,11 +103,13 @@ int main(int argc, char *argv[]) {
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(port);
 
+    // binding the socket
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind");
         exit(EXIT_FAILURE);
     }
 
+    // listening
     if (listen(server_fd, 1) < 0) {
         perror("listen");
         exit(EXIT_FAILURE);
@@ -112,14 +117,18 @@ int main(int argc, char *argv[]) {
 
     printf("Server listening on port %d...\n\n", port);
 
+    // chatting
     while (1) {
+        // accepting a connection
         client_fd = accept(server_fd, (struct sockaddr *)&address, &addr_len);
         if (client_fd < 0) {
             perror("accept");
             continue;
         }
         printf("Client connected from %s\n", inet_ntoa(address.sin_addr));
-        chat(client_fd);
+
+        // chatting
+        chats(client_fd);
     }
 
     close(server_fd);

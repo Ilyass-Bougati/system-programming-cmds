@@ -4,7 +4,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 
-#define COPIES 1000000
+#define COPIES 100
 
 int main(int argc, char *argv[])
 {
